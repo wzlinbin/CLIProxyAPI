@@ -12,12 +12,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/p2p"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
+	apihandlers "github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -89,6 +92,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// p2pModule manages the optional P2P shared-provider subsystem.
+	p2pModule *p2p.Module
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -517,6 +523,36 @@ func (s *Service) Run(ctx context.Context) error {
 	if apiKeyResult == nil {
 		apiKeyResult = &APIKeyClientResult{}
 	}
+	log.Debugf(
+		"cliproxy startup sources: token_auth=%d gemini_keys=%d vertex_keys=%d claude_keys=%d codex_keys=%d openai_compat=%d",
+		tokenResult.SuccessfulAuthed,
+		apiKeyResult.GeminiKeyCount,
+		apiKeyResult.VertexCompatKeyCount,
+		apiKeyResult.ClaudeKeyCount,
+		apiKeyResult.CodexKeyCount,
+		apiKeyResult.OpenAICompatCount,
+	)
+
+	if s.p2pModule == nil {
+		module, errP2P := p2p.NewModule(ctx, p2p.SettingsFromEnv())
+		if errP2P != nil {
+			return fmt.Errorf("cliproxy: failed to initialize p2p module: %w", errP2P)
+		}
+		if module != nil {
+			s.p2pModule = module
+			s.serverOptions = append(s.serverOptions, api.WithRouterConfigurator(
+				func(engine *gin.Engine, base *apihandlers.BaseAPIHandler, _ *config.Config) {
+					module.RegisterRoutes(engine, base)
+				},
+			))
+			if plugin := module.UsagePlugin(); plugin != nil {
+				usage.RegisterPlugin(plugin)
+			}
+			if errStartP2P := module.Start(ctx, s.applyCoreAuthAddOrUpdate, s.applyCoreAuthRemoval); errStartP2P != nil {
+				return fmt.Errorf("cliproxy: failed to start p2p module: %w", errStartP2P)
+			}
+		}
+	}
 
 	// legacy clients removed; no caches to refresh
 
@@ -762,6 +798,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				}
 			}
 		}
+		if s.p2pModule != nil {
+			s.p2pModule.Close()
+			s.p2pModule = nil
+		}
 
 		usage.StopDefault()
 	})
@@ -827,6 +867,14 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		if val, ok := a.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
 			excluded = strings.Split(val, ",")
 		}
+	}
+	if runtimeModels := runtimeModelsFromAuth(a); len(runtimeModels) > 0 {
+		key := provider
+		if key == "" {
+			key = strings.ToLower(strings.TrimSpace(a.Provider))
+		}
+		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(runtimeModels, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		return
 	}
 	var models []*ModelInfo
 	switch provider {
@@ -1261,6 +1309,75 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		clone := *model
 		clone.ID = trimmedPrefix + "/" + baseID
 		addModel(&clone)
+	}
+	return out
+}
+
+func runtimeModelsFromAuth(a *coreauth.Auth) []*ModelInfo {
+	if a == nil || a.Attributes == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(a.Attributes["runtime_models"])
+	if raw == "" {
+		return nil
+	}
+
+	providerType := strings.TrimSpace(a.Attributes["provider_type"])
+	ownedBy := strings.TrimSpace(a.Label)
+	if strings.HasPrefix(strings.ToLower(ownedBy), "p2p:") {
+		ownedBy = strings.TrimSpace(ownedBy[4:])
+	}
+	if ownedBy == "" {
+		ownedBy = "p2p"
+	}
+	now := time.Now().Unix()
+	out := make([]*ModelInfo, 0)
+	seen := make(map[string]struct{})
+	for _, item := range strings.Split(raw, ",") {
+		modelID := strings.TrimSpace(item)
+		if modelID == "" {
+			continue
+		}
+		key := strings.ToLower(modelID)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		if info := registry.LookupStaticModelInfo(modelID); info != nil {
+			clone := *info
+			clone.ID = modelID
+			if clone.Object == "" {
+				clone.Object = "model"
+			}
+			if clone.Created == 0 {
+				clone.Created = now
+			}
+			if clone.OwnedBy == "" {
+				clone.OwnedBy = ownedBy
+			}
+			if clone.Type == "" {
+				clone.Type = providerType
+			}
+			out = append(out, &clone)
+			continue
+		}
+
+		info := &ModelInfo{
+			ID:          modelID,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     ownedBy,
+			Type:        providerType,
+			DisplayName: modelID,
+			Description: modelID,
+			UserDefined: true,
+		}
+		if strings.EqualFold(providerType, "gemini") {
+			info.Name = "models/" + modelID
+			info.SupportedGenerationMethods = []string{"generateContent"}
+		}
+		out = append(out, info)
 	}
 	return out
 }

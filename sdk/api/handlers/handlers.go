@@ -202,6 +202,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
 	}
+	if requestPool := requestPoolFromContext(ctx); requestPool != "" {
+		meta[coreexecutor.RequestPoolMetadataKey] = requestPool
+	}
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
 	}
@@ -209,6 +212,23 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
 	return meta
+}
+
+func requestPoolFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+		if raw, exists := ginCtx.Get("request_pool"); exists {
+			switch value := raw.(type) {
+			case string:
+				return strings.TrimSpace(value)
+			case []byte:
+				return strings.TrimSpace(string(value))
+			}
+		}
+	}
+	return ""
 }
 
 func pinnedAuthIDFromContext(ctx context.Context) string {

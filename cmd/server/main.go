@@ -494,7 +494,7 @@ func main() {
 		if tuiMode {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
-				p2p.InitAutoUpdater(context.Background(), cfg.Port)\n\t\tmanagementasset.StartAutoUpdater(context.Background(), configFilePath)
+				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				registry.StartModelsUpdater(context.Background())
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})

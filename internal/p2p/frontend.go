@@ -1,253 +1,612 @@
 package p2p
 
 const frontendHTML = `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>P2P API 共享平台</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: #eee; min-height: 100vh; }
-        .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
-        .header { text-align: center; padding: 40px 0; }
-        .header h1 { font-size: 2.2em; margin-bottom: 10px; background: linear-gradient(90deg, #4ecca3, #3db892); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .header p { color: #888; }
-        .card { background: rgba(22, 33, 62, 0.9); border-radius: 12px; padding: 25px; margin-bottom: 20px; border: 1px solid rgba(78, 204, 163, 0.2); }
-        .card h2 { color: #4ecca3; margin-bottom: 20px; font-size: 1.3em; }
-        .form-group { margin-bottom: 18px; }
-        .form-group label { display: block; margin-bottom: 6px; color: #aaa; font-size: 14px; }
-        .form-group input, .form-group select { width: 100%; padding: 12px; border: 1px solid #333; border-radius: 6px; background: #1a1a2e; color: #fff; font-size: 14px; }
-        .form-group input:focus, .form-group select:focus { outline: none; border-color: #4ecca3; }
-        .form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
-        .btn { padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600; transition: all 0.3s; }
-        .btn-primary { background: linear-gradient(90deg, #4ecca3, #3db892); color: #1a1a2e; }
-        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(78, 204, 163, 0.3); }
-        .btn-secondary { background: #333; color: #fff; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
-        .stat-item { background: rgba(26, 26, 46, 0.6); padding: 18px; border-radius: 8px; text-align: center; }
-        .stat-item .value { font-size: 1.8em; font-weight: bold; color: #4ecca3; }
-        .stat-item .label { color: #888; font-size: 12px; margin-top: 4px; }
-        .warning { background: rgba(233, 69, 96, 0.15); border: 1px solid #e94560; color: #e94560; padding: 12px; border-radius: 6px; margin-bottom: 15px; }
-        .success { background: rgba(78, 204, 163, 0.15); border: 1px solid #4ecca3; color: #4ecca3; padding: 12px; border-radius: 6px; margin-bottom: 15px; }
-        .key-display { background: #1a1a2e; padding: 12px; border-radius: 6px; font-family: monospace; word-break: break-all; margin: 12px 0; border: 1px dashed #4ecca3; font-size: 14px; }
-        .copy-btn { background: none; border: 1px solid #4ecca3; color: #4ecca3; padding: 4px 10px; border-radius: 4px; cursor: pointer; margin-left: 8px; font-size: 12px; }
-        .copy-btn:hover { background: rgba(78, 204, 163, 0.1); }
-        table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #333; font-size: 13px; }
-        th { color: #4ecca3; }
-        .status-badge { padding: 3px 10px; border-radius: 12px; font-size: 11px; }
-        .status-verified { background: rgba(78, 204, 163, 0.2); color: #4ecca3; }
-        .status-pending { background: rgba(240, 165, 0, 0.2); color: #f0a500; }
-        .status-failed { background: rgba(233, 69, 96, 0.2); color: #e94560; }
-        .hidden { display: none; }
-        .info-box { background: rgba(78, 204, 163, 0.1); padding: 15px; border-radius: 6px; margin-top: 20px; }
-        .info-box h3 { color: #4ecca3; margin-bottom: 10px; font-size: 14px; }
-        .info-box p { color: #aaa; font-size: 13px; line-height: 1.6; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>P2P Shared API Pool</title>
+  <style>
+    :root {
+      --bg: #08141b;
+      --panel: rgba(10, 27, 37, 0.86);
+      --panel-strong: rgba(15, 38, 51, 0.94);
+      --line: rgba(126, 191, 178, 0.24);
+      --text: #ecf5f2;
+      --muted: #98b5ae;
+      --accent: #82d9c8;
+      --warn: #f5af68;
+      --danger: #ff7c6d;
+      --shadow: 0 22px 60px rgba(0, 0, 0, 0.28);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(130, 217, 200, 0.22), transparent 32%),
+        radial-gradient(circle at top right, rgba(255, 124, 109, 0.16), transparent 28%),
+        linear-gradient(160deg, #051018 0%, #0a1c26 48%, #102732 100%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .shell {
+      width: min(1160px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 48px;
+    }
+    .hero {
+      display: grid;
+      gap: 20px;
+      grid-template-columns: 1.35fr 0.95fr;
+      margin-bottom: 22px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+    h1, h2, h3, p { margin: 0; }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      padding: 6px 11px;
+      border-radius: 999px;
+      border: 1px solid rgba(130, 217, 200, 0.35);
+      color: var(--accent);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .hero h1 {
+      font-size: clamp(32px, 5vw, 52px);
+      line-height: 0.95;
+      margin-bottom: 14px;
+      max-width: 10ch;
+    }
+    .hero p {
+      color: var(--muted);
+      line-height: 1.7;
+      max-width: 62ch;
+    }
+    .quick-grid, .stats-grid {
+      display: grid;
+      gap: 14px;
+    }
+    .quick-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-top: 18px;
+    }
+    .stat {
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .stat .value {
+      font-size: 28px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .stat .label {
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .hero-note {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      justify-content: space-between;
+      background: linear-gradient(180deg, rgba(18, 44, 58, 0.96), rgba(10, 26, 34, 0.94));
+    }
+    .hero-note code {
+      display: block;
+      margin-top: 14px;
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: rgba(4, 12, 16, 0.72);
+      border: 1px solid rgba(130, 217, 200, 0.22);
+      color: var(--accent);
+      overflow-x: auto;
+    }
+    .layout {
+      display: grid;
+      gap: 22px;
+      grid-template-columns: 1.1fr 0.9fr;
+      align-items: start;
+    }
+    .stack {
+      display: grid;
+      gap: 22px;
+    }
+    form {
+      display: grid;
+      gap: 16px;
+      margin-top: 18px;
+    }
+    .row {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    label {
+      display: block;
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+    }
+    input, select {
+      width: 100%;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: var(--panel-strong);
+      color: var(--text);
+      padding: 13px 14px;
+      border-radius: 14px;
+      font-size: 14px;
+      outline: none;
+    }
+    input:focus, select:focus {
+      border-color: rgba(130, 217, 200, 0.6);
+      box-shadow: 0 0 0 4px rgba(130, 217, 200, 0.1);
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 700;
+      transition: transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
+    }
+    button:hover { transform: translateY(-1px); }
+    .primary {
+      background: linear-gradient(135deg, #82d9c8, #b3ffcc);
+      color: #06212b;
+      box-shadow: 0 10px 30px rgba(130, 217, 200, 0.22);
+    }
+    .secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .notice {
+      margin-top: 16px;
+      border-radius: 16px;
+      padding: 14px 16px;
+      font-size: 14px;
+      line-height: 1.6;
+      display: none;
+    }
+    .notice.success {
+      display: block;
+      background: rgba(130, 217, 200, 0.12);
+      border: 1px solid rgba(130, 217, 200, 0.3);
+      color: #d8fff4;
+    }
+    .notice.error {
+      display: block;
+      background: rgba(255, 124, 109, 0.12);
+      border: 1px solid rgba(255, 124, 109, 0.3);
+      color: #ffd8d4;
+    }
+    .key-box {
+      margin-top: 16px;
+      border-radius: 18px;
+      padding: 16px;
+      background: rgba(4, 12, 16, 0.72);
+      border: 1px dashed rgba(130, 217, 200, 0.35);
+    }
+    .key-box code {
+      display: block;
+      margin-top: 10px;
+      color: var(--accent);
+      font-size: 15px;
+      word-break: break-all;
+    }
+    .stats-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-top: 18px;
+    }
+    .warning {
+      margin-top: 16px;
+      border-radius: 16px;
+      padding: 14px 16px;
+      background: rgba(245, 175, 104, 0.1);
+      border: 1px solid rgba(245, 175, 104, 0.3);
+      color: #ffddb5;
+      display: none;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 18px;
+      overflow: hidden;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    th, td {
+      padding: 14px 12px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      font-size: 13px;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .badge.verified { background: rgba(130, 217, 200, 0.14); color: var(--accent); }
+    .badge.pending { background: rgba(245, 175, 104, 0.14); color: #ffcf96; }
+    .badge.failed { background: rgba(255, 124, 109, 0.14); color: #ffb7ae; }
+    .tips {
+      display: grid;
+      gap: 12px;
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+    .empty {
+      color: var(--muted);
+      text-align: center;
+      padding: 18px 12px;
+    }
+    @media (max-width: 960px) {
+      .hero, .layout { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 680px) {
+      .row, .quick-grid, .stats-grid { grid-template-columns: 1fr; }
+      .shell { width: min(100% - 20px, 1160px); }
+      .panel { padding: 20px; border-radius: 20px; }
+      button { width: 100%; }
+      .actions { display: grid; }
+    }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🔄 P2P API 共享平台</h1>
-            <p>贡献您的 API Key，获取系统访问权限</p>
+  <div class="shell">
+    <section class="hero">
+      <div class="panel">
+        <div class="eyebrow">P2P Shared Pool</div>
+        <h1>Share capacity. Earn usage. Stay within ratio.</h1>
+        <p>
+          Register an API credential you control, let the platform verify it, and receive a
+          dedicated <code>sk-p2p-*</code> key for the shared request pool. Shared requests go through
+          <code>/p2p/v1</code> so they stay isolated from the main proxy traffic.
+        </p>
+        <div class="quick-grid">
+          <div class="stat"><div class="value" id="ovUsers">-</div><div class="label">registered users</div></div>
+          <div class="stat"><div class="value" id="ovProviders">-</div><div class="label">verified providers</div></div>
+          <div class="stat"><div class="value" id="ovModels">-</div><div class="label">shared models</div></div>
+          <div class="stat"><div class="value" id="ovTokens">-</div><div class="label">tokens today</div></div>
         </div>
-        
-        <div id="registerPanel" class="card">
-            <h2>📝 注册新账户</h2>
-            <form id="registerForm">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>邮箱 (可选)</label>
-                        <input type="email" id="email" placeholder="your@email.com">
-                    </div>
-                    <div class="form-group">
-                        <label>提供商类型 *</label>
-                        <select id="providerType" required>
-                            <option value="openai">OpenAI</option>
-                            <option value="claude">Claude</option>
-                            <option value="gemini">Gemini</option>
-                            <option value="codex">Codex</option>
-                            <option value="qwen">Qwen</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>配置名称 *</label>
-                        <input type="text" id="name" placeholder="我的 OpenAI Key" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Base URL (可选)</label>
-                        <input type="text" id="baseUrl" placeholder="留空使用默认">
-                    </div>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>API Key *</label>
-                        <input type="text" id="apiKey" placeholder="sk-..." required>
-                    </div>
-                    <div class="form-group">
-                        <label>每日 Token 限额</label>
-                        <input type="number" id="dailyLimit" placeholder="1000000" value="1000000">
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label>支持的模型 (留空自动检测)</label>
-                    <input type="text" id="models" placeholder="gpt-4o, gpt-4o-mini (逗号分隔)">
-                </div>
-                <button type="submit" class="btn btn-primary">注册并验证</button>
-            </form>
+      </div>
+      <div class="panel hero-note">
+        <div>
+          <div class="eyebrow">Client Base URL</div>
+          <h2>Use the shared namespace for your P2P key.</h2>
+          <code id="baseUrlBox">/p2p/v1</code>
         </div>
-        
-        <div id="successPanel" class="card hidden">
-            <h2>✅ 注册成功！</h2>
-            <div class="success">您的配置正在验证中，验证通过后即可使用。</div>
-            <p><strong>您的系统 API Key：</strong></p>
-            <div class="key-display">
-                <span id="userApiKey"></span>
-                <button class="copy-btn" onclick="copyKey()">复制</button>
+        <div class="tips">
+          <div>1. Register a provider and wait for verification.</div>
+          <div>2. Use the issued shared key only against the shared namespace.</div>
+          <div>3. The hourly guard suspends accounts whose total consumed tokens exceed contributed tokens by 1.2x.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="layout">
+      <div class="stack">
+        <div class="panel">
+          <div class="eyebrow">Register Provider</div>
+          <h2>Add a credential to the pool</h2>
+          <form id="registerForm">
+            <div class="row">
+              <div>
+                <label for="email">Email</label>
+                <input id="email" type="email" placeholder="optional@example.com">
+              </div>
+              <div>
+                <label for="providerType">Provider type</label>
+                <select id="providerType" required>
+                  <option value="openai">OpenAI compatible</option>
+                  <option value="claude">Claude</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="codex">Codex</option>
+                  <option value="qwen">Qwen</option>
+                </select>
+              </div>
             </div>
-            <p style="color: #888; font-size: 13px;">⚠️ 请保存好您的 Key，它只会显示一次。</p>
-            <button class="btn btn-secondary" onclick="showDashboard()" style="margin-top: 12px;">查看仪表盘</button>
-        </div>
-        
-        <div id="dashboardPanel" class="card hidden">
-            <h2>📊 我的仪表盘</h2>
-            <div class="form-group">
-                <label>输入您的 API Key 查看详情</label>
-                <div style="display: flex; gap: 10px;">
-                    <input type="text" id="queryKey" placeholder="sk-p2p-..." style="flex: 1;">
-                    <button class="btn btn-primary" onclick="loadDashboard()">查询</button>
-                </div>
+            <div class="row">
+              <div>
+                <label for="name">Provider label</label>
+                <input id="name" type="text" placeholder="Office OpenAI key" required>
+              </div>
+              <div>
+                <label for="baseUrl">Base URL</label>
+                <input id="baseUrl" type="text" placeholder="optional custom base URL">
+              </div>
             </div>
-            
-            <div id="statsContainer" class="hidden">
-                <div class="stats-grid">
-                    <div class="stat-item">
-                        <div class="value" id="statContributed">-</div>
-                        <div class="label">贡献 Tokens</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="value" id="statConsumed">-</div>
-                        <div class="label">消耗 Tokens</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="value" id="statRatio">-</div>
-                        <div class="label">使用比例</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="value" id="statProviders">-</div>
-                        <div class="label">活跃提供商</div>
-                    </div>
-                </div>
-                
-                <div id="ratioWarning" class="warning hidden">
-                    ⚠️ 您的使用量已超过贡献量的 1.2 倍，账户可能被暂停！
-                </div>
-                
-                <h3 style="margin: 20px 0 10px; color: #4ecca3; font-size: 14px;">我的提供商</h3>
-                <table>
-                    <thead>
-                        <tr><th>名称</th><th>类型</th><th>状态</th><th>每日限额</th></tr>
-                    </thead>
-                    <tbody id="providersTable"></tbody>
-                </table>
+            <div class="row">
+              <div>
+                <label for="apiKey">Provider API key</label>
+                <input id="apiKey" type="text" placeholder="sk-..." required>
+              </div>
+              <div>
+                <label for="dailyLimit">Daily token limit</label>
+                <input id="dailyLimit" type="number" value="1000000" min="0">
+              </div>
             </div>
+            <div>
+              <label for="models">Known models</label>
+              <input id="models" type="text" placeholder="optional, comma separated">
+            </div>
+            <div class="actions">
+              <button class="primary" type="submit">Register and verify</button>
+              <button class="secondary" type="button" onclick="refreshOverview()">Refresh platform stats</button>
+            </div>
+          </form>
+          <div id="registerNotice" class="notice"></div>
+          <div id="issuedKey" class="key-box" style="display:none">
+            <strong>Your shared pool key</strong>
+            <code id="issuedKeyValue"></code>
+            <div class="actions" style="margin-top:12px">
+              <button class="secondary" type="button" onclick="copyIssuedKey()">Copy key</button>
+              <button class="secondary" type="button" onclick="prefillDashboard()">Load my dashboard</button>
+            </div>
+          </div>
         </div>
-        
-        <div class="info-box">
-            <h3>📖 使用说明</h3>
-            <p>1. 注册：提交您拥有的 API Key 和配置信息<br>
-            2. 验证：系统会自动验证您的配置有效性<br>
-            3. 获取 Key：验证通过后，您将获得一个系统 Key<br>
-            4. 使用：使用系统 Key 访问所有可用模型<br>
-            5. 公平机制：如果您的使用量 > 贡献量 × 1.2，Key 将自动失效</p>
+
+        <div class="panel">
+          <div class="eyebrow">Personal Dashboard</div>
+          <h2>Inspect your contribution and usage</h2>
+          <div class="row" style="margin-top:18px">
+            <div style="grid-column:1 / -1">
+              <label for="queryKey">Shared pool API key</label>
+              <input id="queryKey" type="text" placeholder="sk-p2p-...">
+            </div>
+          </div>
+          <div class="actions" style="margin-top:16px">
+            <button class="primary" type="button" onclick="loadDashboard()">Load dashboard</button>
+            <button class="secondary" type="button" onclick="loadSharedModels()">List shared models</button>
+          </div>
+          <div id="dashboardNotice" class="notice"></div>
+          <div id="ratioWarning" class="warning">Current usage ratio is above 1.2x. The hourly guard may suspend this account if it stays over the limit.</div>
+          <div class="stats-grid">
+            <div class="stat"><div class="value" id="statContributed">-</div><div class="label">contributed tokens</div></div>
+            <div class="stat"><div class="value" id="statConsumed">-</div><div class="label">consumed tokens</div></div>
+            <div class="stat"><div class="value" id="statRatio">-</div><div class="label">total ratio</div></div>
+            <div class="stat"><div class="value" id="statActiveProviders">-</div><div class="label">verified providers</div></div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>provider</th>
+                <th>type</th>
+                <th>status</th>
+                <th>daily limit</th>
+              </tr>
+            </thead>
+            <tbody id="providersTable">
+              <tr><td colspan="4" class="empty">Load your dashboard to see provider status.</td></tr>
+            </tbody>
+          </table>
         </div>
-    </div>
-    
-    <script>
-        let currentKey = '';
-        
-        document.getElementById('registerForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const data = {
-                email: document.getElementById('email').value,
-                provider_type: document.getElementById('providerType').value,
-                name: document.getElementById('name').value,
-                base_url: document.getElementById('baseUrl').value,
-                api_key: document.getElementById('apiKey').value,
-                models: document.getElementById('models').value.split(',').map(s => s.trim()).filter(s => s),
-                daily_token_limit: parseInt(document.getElementById('dailyLimit').value) || 1000000
-            };
-            
-            try {
-                const res = await fetch('/p2p/register', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                });
-                const result = await res.json();
-                
-                if (result.success) {
-                    currentKey = result.api_key;
-                    document.getElementById('userApiKey').textContent = result.api_key;
-                    document.getElementById('registerPanel').classList.add('hidden');
-                    document.getElementById('successPanel').classList.remove('hidden');
-                } else {
-                    alert('注册失败: ' + (result.error || '未知错误'));
-                }
-            } catch (err) {
-                alert('请求失败: ' + err.message);
-            }
+      </div>
+
+      <div class="stack">
+        <div class="panel">
+          <div class="eyebrow">Shared Models</div>
+          <h2>What the pool can serve right now</h2>
+          <div class="tips">
+            <div>Call <code>GET /p2p/v1/models</code> with your shared key for an OpenAI-style listing.</div>
+            <div>Native Gemini-compatible traffic is also available at <code>/p2p/v1beta</code>.</div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>model</th>
+              </tr>
+            </thead>
+            <tbody id="modelsTable">
+              <tr><td class="empty">No model snapshot loaded yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <div class="eyebrow">Notes</div>
+          <h2>How the shared pool is enforced</h2>
+          <div class="tips">
+            <div>Shared traffic is isolated from the main proxy by a dedicated request pool.</div>
+            <div>Usage accounting records the consumer key, the serving provider owner, and token totals for each request.</div>
+            <div>If a provider fails verification, it stays out of the runtime pool until the next successful sync.</div>
+            <div>Accounts are checked every hour against the configured contribution ratio.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    let currentIssuedKey = "";
+
+    function setNotice(id, kind, text) {
+      const el = document.getElementById(id);
+      el.className = "notice " + kind;
+      el.textContent = text;
+    }
+
+    function clearNotice(id) {
+      const el = document.getElementById(id);
+      el.className = "notice";
+      el.textContent = "";
+    }
+
+    function formatCompact(value) {
+      const num = Number(value || 0);
+      if (!Number.isFinite(num)) return "-";
+      if (num >= 1000000) return (num / 1000000).toFixed(1) + "M";
+      if (num >= 1000) return (num / 1000).toFixed(1) + "K";
+      return String(num);
+    }
+
+    function formatRatio(value) {
+      const num = Number(value || 0);
+      if (!Number.isFinite(num)) return "-";
+      return num.toFixed(2) + "x";
+    }
+
+    async function refreshOverview() {
+      try {
+        const res = await fetch("/p2p/overview");
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Failed to load overview");
+        }
+        document.getElementById("ovUsers").textContent = formatCompact(data.total_users);
+        document.getElementById("ovProviders").textContent = formatCompact(data.verified_providers);
+        document.getElementById("ovModels").textContent = formatCompact(data.available_models);
+        document.getElementById("ovTokens").textContent = formatCompact(data.today_tokens);
+      } catch (err) {
+        setNotice("registerNotice", "error", err.message);
+      }
+    }
+
+    async function loadSharedModels() {
+      try {
+        const res = await fetch("/p2p/models");
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Failed to load models");
+        }
+        const tbody = document.getElementById("modelsTable");
+        if (!Array.isArray(data.models) || data.models.length === 0) {
+          tbody.innerHTML = '<tr><td class="empty">No verified models are currently available.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = data.models.map(model => '<tr><td>' + model + '</td></tr>').join("");
+      } catch (err) {
+        setNotice("dashboardNotice", "error", err.message);
+      }
+    }
+
+    async function loadDashboard() {
+      clearNotice("dashboardNotice");
+      const apiKey = document.getElementById("queryKey").value.trim();
+      if (!apiKey) {
+        setNotice("dashboardNotice", "error", "Provide a shared pool API key first.");
+        return;
+      }
+
+      try {
+        const res = await fetch("/p2p/info?api_key=" + encodeURIComponent(apiKey));
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Failed to load dashboard");
+        }
+
+        document.getElementById("statContributed").textContent = formatCompact(data.stats.total_contributed);
+        document.getElementById("statConsumed").textContent = formatCompact(data.stats.total_consumed);
+        document.getElementById("statRatio").textContent = formatRatio(data.stats.ratio);
+        document.getElementById("statActiveProviders").textContent = formatCompact(data.stats.active_provider_count);
+        document.getElementById("ratioWarning").style.display = data.stats.ratio > 1.2 ? "block" : "none";
+
+        const rows = (data.providers || []).map(provider => {
+          const badge = "badge " + provider.status;
+          return "<tr>" +
+            "<td>" + provider.name + "</td>" +
+            "<td>" + provider.provider_type + "</td>" +
+            "<td><span class='" + badge + "'>" + provider.status + "</span></td>" +
+            "<td>" + formatCompact(provider.daily_token_limit) + "</td>" +
+          "</tr>";
         });
-        
-        function copyKey() {
-            navigator.clipboard.writeText(currentKey).then(() => alert('已复制到剪贴板'));
+        document.getElementById("providersTable").innerHTML = rows.length > 0
+          ? rows.join("")
+          : '<tr><td colspan="4" class="empty">No provider records found for this key.</td></tr>';
+      } catch (err) {
+        setNotice("dashboardNotice", "error", err.message);
+      }
+    }
+
+    async function registerProvider(event) {
+      event.preventDefault();
+      clearNotice("registerNotice");
+      const payload = {
+        email: document.getElementById("email").value.trim(),
+        provider_type: document.getElementById("providerType").value,
+        name: document.getElementById("name").value.trim(),
+        base_url: document.getElementById("baseUrl").value.trim(),
+        api_key: document.getElementById("apiKey").value.trim(),
+        models: document.getElementById("models").value
+          .split(",")
+          .map(item => item.trim())
+          .filter(Boolean),
+        daily_token_limit: Number(document.getElementById("dailyLimit").value || 0)
+      };
+
+      try {
+        const res = await fetch("/p2p/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || data.message || "Registration failed");
         }
-        
-        function showDashboard() {
-            document.getElementById('successPanel').classList.add('hidden');
-            document.getElementById('dashboardPanel').classList.remove('hidden');
-            document.getElementById('queryKey').value = currentKey;
-            loadDashboard();
-        }
-        
-        async function loadDashboard() {
-            const apiKey = document.getElementById('queryKey').value;
-            if (!apiKey) { alert('请输入 API Key'); return; }
-            
-            try {
-                const res = await fetch('/p2p/info?api_key=' + encodeURIComponent(apiKey));
-                const result = await res.json();
-                
-                if (result.error) { alert('查询失败: ' + result.error); return; }
-                
-                document.getElementById('statsContainer').classList.remove('hidden');
-                
-                document.getElementById('statContributed').textContent = formatNumber(result.stats.total_contributed);
-                document.getElementById('statConsumed').textContent = formatNumber(result.stats.total_consumed);
-                document.getElementById('statRatio').textContent = result.stats.ratio.toFixed(2) + 'x';
-                document.getElementById('statProviders').textContent = result.stats.active_provider_count;
-                
-                document.getElementById('ratioWarning').classList.toggle('hidden', result.stats.ratio <= 1.2);
-                
-                const tbody = document.getElementById('providersTable');
-                tbody.innerHTML = (result.providers || []).map(p => 
-                    '<tr><td>' + p.name + '</td><td>' + p.provider_type + '</td>' +
-                    '<td><span class="status-badge status-' + p.status + '">' + p.status + '</span></td>' +
-                    '<td>' + formatNumber(p.daily_token_limit) + '</td></tr>'
-                ).join('') || '<tr><td colspan="4" style="text-align:center;color:#888">暂无提供商</td></tr>';
-            } catch (err) {
-                alert('请求失败: ' + err.message);
-            }
-        }
-        
-        function formatNumber(num) {
-            if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
-            if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
-            return num;
-        }
-    </script>
+
+        currentIssuedKey = data.api_key || "";
+        document.getElementById("issuedKeyValue").textContent = currentIssuedKey;
+        document.getElementById("issuedKey").style.display = currentIssuedKey ? "block" : "none";
+        setNotice("registerNotice", "success", data.message || "Provider registered and queued for verification.");
+        document.getElementById("registerForm").reset();
+        document.getElementById("dailyLimit").value = "1000000";
+        refreshOverview();
+      } catch (err) {
+        setNotice("registerNotice", "error", err.message);
+      }
+    }
+
+    function copyIssuedKey() {
+      if (!currentIssuedKey) return;
+      navigator.clipboard.writeText(currentIssuedKey).then(() => {
+        setNotice("registerNotice", "success", "Shared pool key copied to clipboard.");
+      });
+    }
+
+    function prefillDashboard() {
+      if (!currentIssuedKey) return;
+      document.getElementById("queryKey").value = currentIssuedKey;
+      loadDashboard();
+    }
+
+    document.getElementById("registerForm").addEventListener("submit", registerProvider);
+    document.getElementById("baseUrlBox").textContent = window.location.origin + "/p2p/v1";
+    refreshOverview();
+    loadSharedModels();
+  </script>
 </body>
 </html>
+`
