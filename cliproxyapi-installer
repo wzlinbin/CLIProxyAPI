@@ -6,10 +6,13 @@
 set -euo pipefail
 
 # Configuration
-REPO_OWNER="router-for-me"
-REPO_NAME="CLIProxyAPI"
+DEFAULT_REPO_OWNER="wzlinbin"
+DEFAULT_REPO_NAME="CLIProxyAPI"
+REPO_OWNER="${CLIPROXYAPI_REPO_OWNER:-${CPA_REPO_OWNER:-$DEFAULT_REPO_OWNER}}"
+REPO_NAME="${CLIPROXYAPI_REPO_NAME:-${CPA_REPO_NAME:-$DEFAULT_REPO_NAME}}"
 INSTALL_DIR="$HOME/cliproxyapi"
-API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
+API_URL="${CLIPROXYAPI_RELEASE_API_URL:-${CPA_RELEASE_API_URL:-https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest}}"
+REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 SCRIPT_NAME="cliproxyapi-installer"
 SERVICE_NAME="cliproxyapi.service"
 STATE_DIR="${INSTALL_DIR}/state"
@@ -70,7 +73,8 @@ show_authentication_info() {
     echo
     echo -e "${BLUE}CLIProxyAPI supports authentication for multiple providers:${NC}"
     echo
-    echo -e "${GREEN}Documentation:${NC} https://github.com/router-for-me/CLIProxyAPI"
+    echo -e "${GREEN}Release Source:${NC} ${REPO_URL}"
+    echo -e "${GREEN}Documentation:${NC} ${REPO_URL}"
     echo
     echo -e "${YELLOW}Authentication commands:${NC}"
     echo
@@ -172,6 +176,7 @@ check_dependencies() {
 
 fetch_release_info() {
     log_info "Fetching latest release information..."
+    log_info "Release source: ${REPO_OWNER}/${REPO_NAME}"
 
     local release_info
     if command -v curl >/dev/null 2>&1; then
@@ -852,6 +857,8 @@ show_status() {
     echo "=============================="
     echo "Install Directory: $INSTALL_DIR"
     echo "Current Version: $current_version"
+    echo "Release Source: ${REPO_OWNER}/${REPO_NAME}"
+    echo "Release API: $API_URL"
     echo "State Directory: $STATE_DIR"
     echo "Usage SQLite DB: $USAGE_DB_PATH"
 
@@ -998,6 +1005,11 @@ SQLite usage persistence behavior:
   - Keeps runtime state under $STATE_DIR
   - Parses host/port from config.yaml for health checks
   - Attempts rollback to the previous version if upgrade fails
+
+Release source behavior:
+  - Defaults to ${DEFAULT_REPO_OWNER}/${DEFAULT_REPO_NAME}
+  - Override with CLIPROXYAPI_REPO_OWNER / CLIPROXYAPI_REPO_NAME
+  - Or override API_URL directly with CLIPROXYAPI_RELEASE_API_URL
 
 Examples:
   $SCRIPT_NAME

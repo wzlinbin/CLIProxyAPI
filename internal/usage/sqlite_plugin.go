@@ -25,6 +25,7 @@ const (
 	defaultMaxPersistedRows    = 250000
 	sqlitePruneEveryInserts    = 250
 	sqliteTimestampLayout      = "2006-01-02T15:04:05.000000000Z07:00"
+	sqliteWriteTimeout         = 5 * time.Second
 )
 
 var defaultSQLitePlugin = &SQLitePlugin{}
@@ -136,7 +137,8 @@ func (p *SQLitePlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	if store == nil {
 		return
 	}
-	if err := store.InsertRecord(ctx, record); err != nil {
+	stored := normaliseStoredRecord(ctx, record)
+	if err := store.InsertStoredRecord(stored); err != nil {
 		log.WithError(err).Warn("usage: failed to persist sqlite statistics")
 	}
 }
@@ -298,17 +300,22 @@ func (s *sqliteStore) Close() error {
 }
 
 func (s *sqliteStore) InsertRecord(ctx context.Context, record coreusage.Record) error {
+	stored := normaliseStoredRecord(ctx, record)
+	return s.InsertStoredRecord(stored)
+}
+
+func (s *sqliteStore) InsertStoredRecord(stored storedUsageRecord) error {
 	if s == nil || s.insertStmt == nil {
 		return nil
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
-	stored := normaliseStoredRecord(ctx, record)
+
+	writeCtx, cancel := context.WithTimeout(context.Background(), sqliteWriteTimeout)
+	defer cancel()
+
 	_, err := s.insertStmt.ExecContext(
-		ctx,
+		writeCtx,
 		stored.apiName,
 		stored.model,
 		formatSQLiteTimestamp(stored.timestamp),
@@ -327,7 +334,7 @@ func (s *sqliteStore) InsertRecord(ctx context.Context, record coreusage.Record)
 	}
 	s.inserted++
 	if s.shouldPrune() {
-		if _, err := s.pruneLocked(ctx); err != nil {
+		if _, err := s.pruneLocked(writeCtx); err != nil {
 			return err
 		}
 	}

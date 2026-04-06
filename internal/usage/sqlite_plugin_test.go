@@ -147,3 +147,39 @@ func TestSQLiteStorePruneRespectsMaxRows(t *testing.T) {
 		t.Fatalf("expected oldest record to be pruned")
 	}
 }
+
+func TestSQLiteStoreInsertRecordIgnoresCanceledContext(t *testing.T) {
+	store, err := newSQLiteStore(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("newSQLiteStore() error = %v", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("store.Close() error = %v", err)
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	record := coreusage.Record{
+		APIKey:      "canceled-key",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 4, 6, 9, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			TotalTokens: 42,
+		},
+	}
+
+	if err := store.InsertRecord(ctx, record); err != nil {
+		t.Fatalf("InsertRecord() error = %v", err)
+	}
+
+	snapshot, err := store.LoadSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("LoadSnapshot() error = %v", err)
+	}
+	if snapshot.TotalRequests != 1 {
+		t.Fatalf("TotalRequests = %d, want 1", snapshot.TotalRequests)
+	}
+}
