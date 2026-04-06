@@ -1,0 +1,149 @@
+package usage
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+	"time"
+
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+)
+
+func TestSQLiteStoreRoundTrip(t *testing.T) {
+	store, err := newSQLiteStore(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("newSQLiteStore() error = %v", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("store.Close() error = %v", err)
+		}
+	}()
+
+	firstTimestamp := time.Date(2026, 4, 6, 8, 30, 0, 0, time.UTC)
+	first := coreusage.Record{
+		APIKey:      "test-key",
+		Model:       "gpt-5.4",
+		RequestedAt: firstTimestamp,
+		Latency:     1500 * time.Millisecond,
+		Source:      "cli",
+		AuthIndex:   "0",
+		Detail: coreusage.Detail{
+			InputTokens:  10,
+			OutputTokens: 20,
+			TotalTokens:  30,
+		},
+	}
+	second := coreusage.Record{
+		Provider:    "openai",
+		Model:       "gpt-5.4-mini",
+		RequestedAt: firstTimestamp.Add(2 * time.Hour),
+		Latency:     200 * time.Millisecond,
+		Source:      "batch",
+		AuthIndex:   "1",
+		Failed:      true,
+	}
+
+	if err := store.InsertRecord(context.Background(), first); err != nil {
+		t.Fatalf("InsertRecord(first) error = %v", err)
+	}
+	if err := store.InsertRecord(context.Background(), first); err != nil {
+		t.Fatalf("InsertRecord(duplicate) error = %v", err)
+	}
+	if err := store.InsertRecord(context.Background(), second); err != nil {
+		t.Fatalf("InsertRecord(second) error = %v", err)
+	}
+
+	snapshot, err := store.LoadSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("LoadSnapshot() error = %v", err)
+	}
+
+	if snapshot.TotalRequests != 2 {
+		t.Fatalf("TotalRequests = %d, want 2", snapshot.TotalRequests)
+	}
+	if snapshot.SuccessCount != 1 {
+		t.Fatalf("SuccessCount = %d, want 1", snapshot.SuccessCount)
+	}
+	if snapshot.FailureCount != 1 {
+		t.Fatalf("FailureCount = %d, want 1", snapshot.FailureCount)
+	}
+	if snapshot.TotalTokens != 30 {
+		t.Fatalf("TotalTokens = %d, want 30", snapshot.TotalTokens)
+	}
+
+	keySnapshot, ok := snapshot.APIs["test-key"]
+	if !ok {
+		t.Fatalf("expected API snapshot for test-key")
+	}
+	if keySnapshot.TotalRequests != 1 {
+		t.Fatalf("test-key TotalRequests = %d, want 1", keySnapshot.TotalRequests)
+	}
+	modelSnapshot, ok := keySnapshot.Models["gpt-5.4"]
+	if !ok {
+		t.Fatalf("expected model snapshot for gpt-5.4")
+	}
+	if len(modelSnapshot.Details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(modelSnapshot.Details))
+	}
+	if modelSnapshot.Details[0].LatencyMs != 1500 {
+		t.Fatalf("LatencyMs = %d, want 1500", modelSnapshot.Details[0].LatencyMs)
+	}
+
+	providerSnapshot, ok := snapshot.APIs["openai"]
+	if !ok {
+		t.Fatalf("expected API snapshot for provider-derived key")
+	}
+	if providerSnapshot.TotalRequests != 1 {
+		t.Fatalf("openai TotalRequests = %d, want 1", providerSnapshot.TotalRequests)
+	}
+	if !providerSnapshot.Models["gpt-5.4-mini"].Details[0].Failed {
+		t.Fatalf("expected persisted failed flag for second record")
+	}
+}
+
+func TestSQLiteStorePruneRespectsMaxRows(t *testing.T) {
+	store, err := newSQLiteStoreWithRetention(
+		filepath.Join(t.TempDir(), "usage.sqlite"),
+		sqliteRetentionSettings{RetentionDays: 0, MaxRows: 2},
+	)
+	if err != nil {
+		t.Fatalf("newSQLiteStoreWithRetention() error = %v", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("store.Close() error = %v", err)
+		}
+	}()
+
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	records := []coreusage.Record{
+		{APIKey: "a", Model: "m1", RequestedAt: base, Detail: coreusage.Detail{TotalTokens: 1}},
+		{APIKey: "a", Model: "m2", RequestedAt: base.Add(time.Hour), Detail: coreusage.Detail{TotalTokens: 2}},
+		{APIKey: "b", Model: "m3", RequestedAt: base.Add(2 * time.Hour), Detail: coreusage.Detail{TotalTokens: 3}},
+	}
+	for _, record := range records {
+		if err := store.InsertRecord(context.Background(), record); err != nil {
+			t.Fatalf("InsertRecord() error = %v", err)
+		}
+	}
+
+	deleted, err := store.Prune(context.Background())
+	if err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", deleted)
+	}
+
+	snapshot, err := store.LoadSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("LoadSnapshot() error = %v", err)
+	}
+	if snapshot.TotalRequests != 2 {
+		t.Fatalf("TotalRequests = %d, want 2", snapshot.TotalRequests)
+	}
+	if _, ok := snapshot.APIs["a"].Models["m1"]; ok {
+		t.Fatalf("expected oldest record to be pruned")
+	}
+}

@@ -17,14 +17,14 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/p2p"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	apihandlers "github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
@@ -102,8 +102,8 @@ type Service struct {
 //
 // Parameters:
 //   - plugin: The usage plugin to register
-func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
-	usage.RegisterPlugin(plugin)
+func (s *Service) RegisterUsagePlugin(plugin coreusage.Plugin) {
+	coreusage.RegisterPlugin(plugin)
 }
 
 // newDefaultAuthManager creates a default authentication manager with all supported providers.
@@ -489,7 +489,10 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	usage.StartDefault(ctx)
+	if err := internalusage.EnableSQLitePersistence(ctx, s.configPath, s.cfg); err != nil {
+		log.WithError(err).Warn("failed to enable usage sqlite persistence; continuing with in-memory statistics only")
+	}
+	coreusage.StartDefault(ctx)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -549,7 +552,7 @@ func (s *Service) Run(ctx context.Context) error {
 				},
 			))
 			if plugin := module.UsagePlugin(); plugin != nil {
-				usage.RegisterPlugin(plugin)
+				coreusage.RegisterPlugin(plugin)
 			}
 			if errStartP2P := module.Start(ctx, s.applyCoreAuthAddOrUpdate, s.applyCoreAuthRemoval); errStartP2P != nil {
 				return fmt.Errorf("cliproxy: failed to start p2p module: %w", errStartP2P)
@@ -806,7 +809,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.p2pModule = nil
 		}
 
-		usage.StopDefault()
+		coreusage.StopDefault()
+		if err := internalusage.DisableSQLitePersistence(); err != nil {
+			log.Errorf("failed to close usage sqlite persistence: %v", err)
+			if shutdownErr == nil {
+				shutdownErr = err
+			}
+		}
 	})
 	return shutdownErr
 }

@@ -1,0 +1,1017 @@
+#!/bin/bash
+
+# CLIProxyAPI Linux Installer
+# Adapted for SQLite usage persistence and runtime state preservation.
+
+set -euo pipefail
+
+# Configuration
+REPO_OWNER="router-for-me"
+REPO_NAME="CLIProxyAPI"
+INSTALL_DIR="$HOME/cliproxyapi"
+API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
+SCRIPT_NAME="cliproxyapi-installer"
+SERVICE_NAME="cliproxyapi.service"
+STATE_DIR="${INSTALL_DIR}/state"
+STATIC_DIR="${INSTALL_DIR}/static"
+USAGE_DB_BASENAME="usage-statistics.sqlite"
+USAGE_DB_PATH="${STATE_DIR}/${USAGE_DB_BASENAME}"
+DEFAULT_HEALTH_HOST="127.0.0.1"
+DEFAULT_HEALTH_PORT="8317"
+
+ROLLBACK_ENABLED=false
+ROLLBACK_PREVIOUS_VERSION=""
+ROLLBACK_PREVIOUS_VERSION_DIR=""
+ROLLBACK_PREVIOUS_CONFIG=""
+ROLLBACK_RUNTIME_STATE=""
+ROLLBACK_SERVICE_WAS_RUNNING=false
+ROLLBACK_FAILED_VERSION_DIR=""
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+log_step() {
+    echo -e "${CYAN}[STEP]${NC} $1"
+}
+
+trim_quotes() {
+    local value="$1"
+    value="${value%\"}"
+    value="${value#\"}"
+    value="${value%\'}"
+    value="${value#\'}"
+    echo "$value"
+}
+
+show_authentication_info() {
+    echo
+    echo -e "${YELLOW}IMPORTANT: Authentication setup required${NC}"
+    echo
+    echo -e "${BLUE}CLIProxyAPI supports authentication for multiple providers:${NC}"
+    echo
+    echo -e "${GREEN}Documentation:${NC} https://github.com/router-for-me/CLIProxyAPI"
+    echo
+    echo -e "${YELLOW}Authentication commands:${NC}"
+    echo
+    echo -e "${GREEN}Gemini:${NC}  ./cli-proxy-api --login"
+    echo -e "${GREEN}Codex:${NC}   ./cli-proxy-api --codex-login"
+    echo -e "${GREEN}Claude:${NC}  ./cli-proxy-api --claude-login"
+    echo -e "${GREEN}Qwen:${NC}    ./cli-proxy-api --qwen-login"
+    echo -e "${GREEN}iFlow:${NC}   ./cli-proxy-api --iflow-login"
+    echo
+}
+
+generate_api_key() {
+    local prefix="sk-"
+    local chars="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    local key=""
+
+    for i in {1..45}; do
+        key="${key}${chars:$((RANDOM % ${#chars})):1}"
+    done
+
+    echo "${prefix}${key}"
+}
+
+check_api_keys() {
+    local config_file="${INSTALL_DIR}/config.yaml"
+
+    if [[ ! -f "$config_file" ]]; then
+        return 1
+    fi
+
+    if grep -q '"your-api-key-1"' "$config_file" || grep -q '"your-api-key-2"' "$config_file"; then
+        return 1
+    fi
+
+    if grep -A 10 "^api-keys:" "$config_file" | grep -v "^#" | grep -v "^api-keys:" | grep -q '"sk-[^"]*"'; then
+        return 0
+    fi
+
+    return 1
+}
+
+show_api_key_setup() {
+    echo
+    echo -e "${YELLOW}IMPORTANT: configure API keys before first run${NC}"
+    echo
+    echo -e "${GREEN}Edit:${NC} ${CYAN}${INSTALL_DIR}/config.yaml${NC}"
+    echo -e "${GREEN}Replace:${NC} \"your-api-key-1\" / \"your-api-key-2\" with real keys"
+    echo
+}
+
+show_quick_start() {
+    local install_dir="$1"
+    echo
+    echo -e "${GREEN}Quick Start:${NC}"
+    echo -e "  ${CYAN}cd $install_dir${NC}"
+
+    if ! check_api_keys; then
+        show_api_key_setup
+    fi
+
+    echo -e "  ${CYAN}./cli-proxy-api --login${NC}"
+    echo -e "  ${CYAN}./cli-proxy-api --codex-login${NC}"
+    echo -e "  ${CYAN}systemctl --user enable ${SERVICE_NAME}${NC}"
+    echo -e "  ${CYAN}systemctl --user start ${SERVICE_NAME}${NC}"
+    echo
+}
+
+detect_linux_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)
+            echo "linux_amd64"
+            ;;
+        arm64|aarch64)
+            echo "linux_arm64"
+            ;;
+        *)
+            log_error "Unsupported architecture: $(uname -m)"
+            exit 1
+            ;;
+    esac
+}
+
+check_dependencies() {
+    local missing_tools=()
+
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        missing_tools+=("curl or wget")
+    fi
+
+    if ! command -v tar >/dev/null 2>&1; then
+        missing_tools+=("tar")
+    fi
+
+    if [[ ${#missing_tools[@]} -gt 0 ]]; then
+        log_error "Missing required tools: ${missing_tools[*]}"
+        exit 1
+    fi
+}
+
+fetch_release_info() {
+    log_info "Fetching latest release information..."
+
+    local release_info
+    if command -v curl >/dev/null 2>&1; then
+        release_info=$(curl -s "$API_URL")
+    else
+        release_info=$(wget -qO- "$API_URL")
+    fi
+
+    if [[ -z "$release_info" ]]; then
+        log_error "Failed to fetch release information"
+        exit 1
+    fi
+
+    echo "$release_info"
+}
+
+extract_release_info() {
+    local release_info="$1"
+    local os_arch="$2"
+
+    local version
+    version=$(echo "$release_info" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4 | sed 's/^v//')
+
+    if [[ -z "$version" ]]; then
+        log_error "Failed to extract version from release info"
+        exit 1
+    fi
+
+    local expected_filename="CLIProxyAPI_${version}_${os_arch}.tar.gz"
+    local download_url
+    download_url=$(echo "$release_info" | grep -o "\"browser_download_url\": *\"[^\"]*${expected_filename}[^\"]*\"" | cut -d'"' -f4)
+
+    if [[ -z "$download_url" ]]; then
+        log_error "Failed to find download URL for ${expected_filename}"
+        exit 1
+    fi
+
+    echo "${version}|${download_url}"
+}
+
+is_installed() {
+    [[ -f "${INSTALL_DIR}/version.txt" ]]
+}
+
+get_current_version() {
+    if is_installed; then
+        cat "${INSTALL_DIR}/version.txt" 2>/dev/null || echo "unknown"
+    else
+        echo "none"
+    fi
+}
+
+get_current_version_dir() {
+    local current_version
+    current_version=$(get_current_version)
+    if [[ "$current_version" != "none" ]]; then
+        echo "${INSTALL_DIR}/${current_version}"
+    else
+        echo ""
+    fi
+}
+
+ensure_runtime_dirs() {
+    mkdir -p "$INSTALL_DIR" "$STATE_DIR" "$STATIC_DIR"
+}
+
+usage_db_exists() {
+    [[ -f "$USAGE_DB_PATH" || -f "${USAGE_DB_PATH}-wal" || -f "${USAGE_DB_PATH}-shm" ]]
+}
+
+backup_config() {
+    local config="${INSTALL_DIR}/config.yaml"
+
+    if [[ -f "$config" ]]; then
+        local backup_dir="${INSTALL_DIR}/config_backup"
+        mkdir -p "$backup_dir"
+
+        local timestamp
+        timestamp=$(date +"%Y%m%d_%H%M%S")
+        local backup_file="${backup_dir}/config_${timestamp}.yaml"
+
+        cp "$config" "$backup_file"
+        log_info "Configuration backed up to: $backup_file"
+        echo "$backup_file"
+    else
+        echo ""
+    fi
+}
+
+backup_runtime_state() {
+    local backup_root="${INSTALL_DIR}/state_backup"
+    local timestamp
+    timestamp=$(date +"%Y%m%d_%H%M%S")
+    local backup_dir="${backup_root}/state_${timestamp}"
+
+    mkdir -p "$backup_root"
+
+    if [[ ! -d "$STATE_DIR" ]]; then
+        echo ""
+        return
+    fi
+
+    if ! usage_db_exists; then
+        echo ""
+        return
+    fi
+
+    mkdir -p "$backup_dir"
+    shopt -s nullglob
+    local files=("${USAGE_DB_PATH}" "${USAGE_DB_PATH}-wal" "${USAGE_DB_PATH}-shm")
+    local copied=false
+    for file in "${files[@]}"; do
+        if [[ -f "$file" ]]; then
+            cp "$file" "$backup_dir/"
+            copied=true
+        fi
+    done
+    shopt -u nullglob
+
+    if [[ "$copied" == true ]]; then
+        log_info "Runtime state backed up to: $backup_dir"
+        echo "$backup_dir"
+    else
+        rmdir "$backup_dir" 2>/dev/null || true
+        echo ""
+    fi
+}
+
+restore_config() {
+    local backup_file="$1"
+
+    if [[ -n "$backup_file" && -f "$backup_file" ]]; then
+        cp "$backup_file" "${INSTALL_DIR}/config.yaml"
+        log_success "Configuration restored from backup"
+    fi
+}
+
+restore_runtime_state() {
+    local backup_dir="$1"
+
+    ensure_runtime_dirs
+
+    if usage_db_exists; then
+        log_info "Existing SQLite usage database preserved at ${USAGE_DB_PATH}"
+        return
+    fi
+
+    if [[ -z "$backup_dir" || ! -d "$backup_dir" ]]; then
+        return
+    fi
+
+    shopt -s nullglob
+    local files=("${backup_dir}/${USAGE_DB_BASENAME}" "${backup_dir}/${USAGE_DB_BASENAME}-wal" "${backup_dir}/${USAGE_DB_BASENAME}-shm")
+    local restored=false
+    for file in "${files[@]}"; do
+        if [[ -f "$file" ]]; then
+            cp "$file" "$STATE_DIR/"
+            restored=true
+        fi
+    done
+    shopt -u nullglob
+
+    if [[ "$restored" == true ]]; then
+        log_success "Restored SQLite usage state to ${STATE_DIR}"
+    fi
+}
+
+extract_yaml_scalar() {
+    local file="$1"
+    local key="$2"
+
+    if [[ ! -f "$file" ]]; then
+        echo ""
+        return
+    fi
+
+    awk -F':' -v wanted="$key" '
+        $1 == wanted {
+            sub(/^[[:space:]]+/, "", $2)
+            value=$2
+            for (i=3; i<=NF; i++) {
+                value=value":"$i
+            }
+            sub(/[[:space:]]+#.*$/, "", value)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            print value
+            exit
+        }
+    ' "$file"
+}
+
+resolve_health_host() {
+    local config_file="${INSTALL_DIR}/config.yaml"
+    local raw_host
+    raw_host=$(extract_yaml_scalar "$config_file" "host")
+    raw_host=$(trim_quotes "$raw_host")
+
+    case "$raw_host" in
+        ""|"0.0.0.0"|"::"|"[::]"|"::0")
+            echo "$DEFAULT_HEALTH_HOST"
+            ;;
+        "localhost"|"127.0.0.1")
+            echo "$raw_host"
+            ;;
+        *)
+            echo "$raw_host"
+            ;;
+    esac
+}
+
+resolve_health_port() {
+    local config_file="${INSTALL_DIR}/config.yaml"
+    local raw_port
+    raw_port=$(extract_yaml_scalar "$config_file" "port")
+    raw_port=$(trim_quotes "$raw_port")
+
+    if [[ "$raw_port" =~ ^[0-9]+$ ]]; then
+        echo "$raw_port"
+    else
+        echo "$DEFAULT_HEALTH_PORT"
+    fi
+}
+
+restore_main_executable_from_version() {
+    local version_dir="$1"
+    if [[ -z "$version_dir" || ! -d "$version_dir" ]]; then
+        return 1
+    fi
+
+    local executable
+    executable=$(find "$version_dir" -name "CLIProxyAPI" -o -name "cli-proxy-api" -type f | head -1)
+    if [[ -z "$executable" || ! -f "$executable" ]]; then
+        return 1
+    fi
+
+    cp "$executable" "${INSTALL_DIR}/cli-proxy-api"
+    chmod +x "${INSTALL_DIR}/cli-proxy-api"
+    return 0
+}
+
+rollback_install() {
+    if [[ "$ROLLBACK_ENABLED" != true ]]; then
+        return
+    fi
+
+    set +e
+    trap - ERR
+    log_error "Installation failed. Attempting rollback..."
+
+    stop_service || true
+    stop_cliproxyapi_processes || true
+
+    if [[ -n "$ROLLBACK_FAILED_VERSION_DIR" && -d "$ROLLBACK_FAILED_VERSION_DIR" ]]; then
+        rm -rf "$ROLLBACK_FAILED_VERSION_DIR"
+        log_info "Removed failed version directory: $ROLLBACK_FAILED_VERSION_DIR"
+    fi
+
+    if [[ -n "$ROLLBACK_PREVIOUS_CONFIG" && -f "$ROLLBACK_PREVIOUS_CONFIG" ]]; then
+        cp "$ROLLBACK_PREVIOUS_CONFIG" "${INSTALL_DIR}/config.yaml"
+        log_info "Restored previous config.yaml"
+    fi
+
+    if [[ -n "$ROLLBACK_RUNTIME_STATE" && -d "$ROLLBACK_RUNTIME_STATE" ]]; then
+        rm -f "${USAGE_DB_PATH}" "${USAGE_DB_PATH}-wal" "${USAGE_DB_PATH}-shm"
+        restore_runtime_state "$ROLLBACK_RUNTIME_STATE"
+    fi
+
+    if [[ -n "$ROLLBACK_PREVIOUS_VERSION" ]]; then
+        echo "$ROLLBACK_PREVIOUS_VERSION" > "${INSTALL_DIR}/version.txt"
+        log_info "Restored version.txt to ${ROLLBACK_PREVIOUS_VERSION}"
+    fi
+
+    if restore_main_executable_from_version "$ROLLBACK_PREVIOUS_VERSION_DIR"; then
+        log_info "Restored main executable from ${ROLLBACK_PREVIOUS_VERSION_DIR}"
+    fi
+
+    create_systemd_service || true
+
+    if [[ "$ROLLBACK_SERVICE_WAS_RUNNING" == true ]]; then
+        start_service || true
+        verify_service_health || true
+    fi
+
+    log_warning "Rollback completed as best effort. Please verify service status manually."
+}
+
+handle_error() {
+    local exit_code=$?
+    rollback_install
+    exit "$exit_code"
+}
+
+is_service_running() {
+    systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null
+}
+
+is_cliproxyapi_running() {
+    pgrep -f "cli-proxy-api" >/dev/null 2>&1
+}
+
+stop_cliproxyapi_processes() {
+    local pids
+    pids=$(pgrep -f "cli-proxy-api" 2>/dev/null || true)
+
+    if [[ -z "$pids" ]]; then
+        log_info "No standalone CLIProxyAPI processes are running"
+        return
+    fi
+
+    log_info "Stopping running CLIProxyAPI processes..."
+    echo "$pids" | while read -r pid; do
+        if [[ -n "$pid" ]]; then
+            kill "$pid" 2>/dev/null || true
+        fi
+    done
+
+    sleep 2
+
+    local remaining_pids
+    remaining_pids=$(pgrep -f "cli-proxy-api" 2>/dev/null || true)
+    if [[ -n "$remaining_pids" ]]; then
+        log_warning "Some processes did not exit cleanly, force killing..."
+        echo "$remaining_pids" | while read -r pid; do
+            if [[ -n "$pid" ]]; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    log_success "All CLIProxyAPI processes stopped"
+}
+
+stop_service() {
+    if is_service_running; then
+        log_info "Stopping ${SERVICE_NAME}..."
+        systemctl --user stop "$SERVICE_NAME"
+        log_success "Service stopped"
+    else
+        log_info "Service is not running"
+    fi
+}
+
+start_service() {
+    log_info "Starting ${SERVICE_NAME}..."
+    systemctl --user start "$SERVICE_NAME"
+    sleep 2
+    if is_service_running; then
+        log_success "Service started successfully"
+    else
+        log_warning "Service may not have started correctly. Check: systemctl --user status ${SERVICE_NAME}"
+    fi
+}
+
+restart_service() {
+    log_info "Restarting ${SERVICE_NAME}..."
+    systemctl --user restart "$SERVICE_NAME"
+    sleep 2
+    if is_service_running; then
+        log_success "Service restarted successfully"
+    else
+        log_warning "Service may not have started correctly. Check: systemctl --user status ${SERVICE_NAME}"
+    fi
+}
+
+verify_service_health() {
+    if ! is_service_running; then
+        log_warning "Skipping health check because service is not running"
+        return 1
+    fi
+
+    local host
+    local port
+    local url
+    host=$(resolve_health_host)
+    port=$(resolve_health_port)
+    url="http://${host}:${port}/healthz"
+
+    local attempt
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        if command -v curl >/dev/null 2>&1; then
+            if curl -fsS "$url" >/dev/null 2>&1; then
+                log_success "Health check passed on ${url}"
+                return 0
+            fi
+        elif command -v wget >/dev/null 2>&1; then
+            if wget -qO- "$url" >/dev/null 2>&1; then
+                log_success "Health check passed on ${url}"
+                return 0
+            fi
+        fi
+        sleep 2
+    done
+
+    log_warning "Health check did not succeed on ${url}. Verify host/port in config.yaml and inspect systemctl logs."
+    return 1
+}
+
+create_systemd_service() {
+    local service_file="${INSTALL_DIR}/cliproxyapi.service"
+    local systemd_dir="$HOME/.config/systemd/user"
+    local systemd_service_file="${systemd_dir}/${SERVICE_NAME}"
+
+    log_info "Creating systemd service file..."
+    mkdir -p "$systemd_dir"
+    ensure_runtime_dirs
+
+    cat > "$service_file" << EOF
+[Unit]
+Description=CLIProxyAPI Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/cli-proxy-api
+Restart=always
+RestartSec=10
+Environment=HOME=$HOME
+Environment=WRITABLE_PATH=$INSTALL_DIR
+Environment=USAGE_SQLITE_PATH=$USAGE_DB_PATH
+
+[Install]
+WantedBy=default.target
+EOF
+
+    cp "$service_file" "$systemd_service_file"
+    systemctl --user daemon-reload || log_warning "Could not reload systemd daemon"
+
+    log_success "Systemd service file created: $systemd_service_file"
+}
+
+setup_config() {
+    local version_dir="$1"
+    local backup_file="$2"
+
+    log_info "Setting up configuration..."
+
+    local config="${INSTALL_DIR}/config.yaml"
+    local example_config="${version_dir}/config.example.yaml"
+    local executable="${version_dir}/cli-proxy-api"
+
+    ensure_runtime_dirs
+
+    if [[ -f "$executable" ]]; then
+        cp "$executable" "${INSTALL_DIR}/cli-proxy-api"
+        chmod +x "${INSTALL_DIR}/cli-proxy-api"
+        log_success "Copied executable to ${INSTALL_DIR}/cli-proxy-api"
+    fi
+
+    if [[ -n "$backup_file" && -f "$backup_file" ]]; then
+        cp "$backup_file" "$config"
+        log_success "Restored configuration from upgrade backup"
+        return
+    fi
+
+    if [[ -f "$config" ]]; then
+        log_success "Preserved existing config.yaml"
+        return
+    fi
+
+    local current_version_dir
+    current_version_dir=$(get_current_version_dir)
+    if [[ -n "$current_version_dir" && -f "${current_version_dir}/config.yaml" ]]; then
+        cp "${current_version_dir}/config.yaml" "$config"
+        log_success "Preserved configuration from previous version directory"
+        return
+    fi
+
+    if [[ -f "$example_config" ]]; then
+        cp "$example_config" "$config"
+
+        local generated_key1
+        local generated_key2
+        generated_key1=$(generate_api_key)
+        generated_key2=$(generate_api_key)
+        sed -i "s/\"your-api-key-1\"/\"$generated_key1\"/g" "$config"
+        sed -i "s/\"your-api-key-2\"/\"$generated_key2\"/g" "$config"
+        log_success "Created config.yaml from example with generated API keys"
+    else
+        log_warning "config.example.yaml not found; create config.yaml manually"
+    fi
+}
+
+download_file() {
+    local url="$1"
+    local output="$2"
+
+    log_info "Downloading $(basename "$url")..."
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -L -o "$output" "$url"
+    else
+        wget -O "$output" "$url"
+    fi
+
+    if [[ ! -f "$output" ]]; then
+        log_error "Failed to download file"
+        exit 1
+    fi
+
+    log_success "Download completed"
+}
+
+extract_archive() {
+    local archive="$1"
+    local dest_dir="$2"
+
+    log_info "Extracting archive to $dest_dir..."
+    mkdir -p "$dest_dir"
+    tar -xzf "$archive" -C "$dest_dir"
+    log_success "Extraction completed"
+}
+
+write_version_file() {
+    local version="$1"
+    echo "$version" > "${INSTALL_DIR}/version.txt"
+    log_success "Version $version written to version.txt"
+}
+
+cleanup_old_versions() {
+    local current_version="$1"
+
+    if [[ ! -d "$INSTALL_DIR" ]]; then
+        return
+    fi
+
+    local old_versions
+    old_versions=$(find "$INSTALL_DIR" -maxdepth 1 -type d -name "*.*.*" -printf "%f\n" | sort -V | head -n -2)
+
+    if [[ -n "$old_versions" ]]; then
+        echo "$old_versions" | while read -r version; do
+            if [[ "$version" != "$current_version" && -n "$version" ]]; then
+                rm -rf "${INSTALL_DIR}/${version}"
+                log_info "Removed old version: $version"
+            fi
+        done
+    fi
+}
+
+make_executable() {
+    local version_dir="$1"
+    local binary
+    binary=$(find "$version_dir" -name "CLIProxyAPI" -o -name "cli-proxy-api" -type f | head -1)
+    if [[ -n "$binary" ]]; then
+        chmod +x "$binary"
+        log_success "Made CLIProxyAPI binary executable"
+    fi
+}
+
+install_cliproxyapi() {
+    local current_version
+    current_version=$(get_current_version)
+    local is_upgrade=false
+    local service_was_running=false
+    local backup_file=""
+    local runtime_state_backup=""
+    local version_dir=""
+
+    ROLLBACK_ENABLED=false
+    ROLLBACK_PREVIOUS_VERSION=""
+    ROLLBACK_PREVIOUS_VERSION_DIR=""
+    ROLLBACK_PREVIOUS_CONFIG=""
+    ROLLBACK_RUNTIME_STATE=""
+    ROLLBACK_SERVICE_WAS_RUNNING=false
+    ROLLBACK_FAILED_VERSION_DIR=""
+
+    if [[ "$current_version" != "none" ]]; then
+        is_upgrade=true
+        log_info "Current CLIProxyAPI version: $current_version"
+        if is_service_running; then
+            service_was_running=true
+            log_info "Service is running and will be restarted after upgrade"
+        fi
+    else
+        log_info "CLIProxyAPI not installed, performing fresh installation"
+    fi
+
+    check_dependencies
+    ensure_runtime_dirs
+
+    local os_arch
+    os_arch=$(detect_linux_arch)
+    log_step "Detected platform: $os_arch"
+
+    local release_info
+    release_info=$(fetch_release_info)
+
+    local release_data
+    release_data=$(extract_release_info "$release_info" "$os_arch")
+    local version
+    local download_url
+    version=$(echo "$release_data" | cut -d'|' -f1)
+    download_url=$(echo "$release_data" | cut -d'|' -f2)
+    log_step "Latest version: $version"
+
+    if [[ "$is_upgrade" == true && "$current_version" == "$version" ]]; then
+        log_success "CLIProxyAPI is already up to date (version $version)"
+        if usage_db_exists; then
+            log_info "SQLite usage database is present at $USAGE_DB_PATH"
+        fi
+        return
+    fi
+
+    if [[ "$is_upgrade" == true ]]; then
+        if is_service_running; then
+            stop_service
+        fi
+        if is_cliproxyapi_running; then
+            stop_cliproxyapi_processes
+        fi
+        backup_file=$(backup_config)
+        runtime_state_backup=$(backup_runtime_state)
+        ROLLBACK_ENABLED=true
+        ROLLBACK_PREVIOUS_VERSION="$current_version"
+        ROLLBACK_PREVIOUS_VERSION_DIR=$(get_current_version_dir)
+        ROLLBACK_PREVIOUS_CONFIG="$backup_file"
+        ROLLBACK_RUNTIME_STATE="$runtime_state_backup"
+        ROLLBACK_SERVICE_WAS_RUNNING="$service_was_running"
+    fi
+
+    version_dir="${INSTALL_DIR}/${version}"
+    ROLLBACK_FAILED_VERSION_DIR="$version_dir"
+    mkdir -p "$INSTALL_DIR"
+
+    local temp_file
+    temp_file=$(mktemp)
+    download_file "$download_url" "$temp_file"
+    extract_archive "$temp_file" "$version_dir"
+    rm -f "$temp_file"
+
+    make_executable "$version_dir"
+    setup_config "$version_dir" "$backup_file"
+    restore_runtime_state "$runtime_state_backup"
+    create_systemd_service
+    write_version_file "$version"
+    cleanup_old_versions "$version"
+
+    if [[ "$is_upgrade" == true && "$service_was_running" == true ]]; then
+        restart_service
+    fi
+
+    if [[ "$is_upgrade" == true && "$service_was_running" == true ]]; then
+        if ! verify_service_health; then
+            rollback_install
+            exit 1
+        fi
+    elif is_service_running; then
+        verify_service_health || true
+    fi
+
+    ROLLBACK_ENABLED=false
+
+    if [[ "$is_upgrade" == true ]]; then
+        log_success "CLIProxyAPI upgraded from $current_version to $version"
+        log_info "Installation directory: $INSTALL_DIR"
+        if usage_db_exists; then
+            log_info "SQLite usage database preserved at: $USAGE_DB_PATH"
+        fi
+        if [[ "$service_was_running" == true ]]; then
+            log_info "Service has been restarted automatically"
+        else
+            log_info "To start the service: systemctl --user start ${SERVICE_NAME}"
+        fi
+    else
+        log_success "CLIProxyAPI $version installed successfully"
+        log_info "Installation directory: $INSTALL_DIR"
+        log_info "SQLite usage database path: $USAGE_DB_PATH"
+        show_authentication_info
+        show_quick_start "$INSTALL_DIR"
+    fi
+}
+
+show_status() {
+    local current_version
+    current_version=$(get_current_version)
+
+    echo "CLIProxyAPI Installation Status"
+    echo "=============================="
+    echo "Install Directory: $INSTALL_DIR"
+    echo "Current Version: $current_version"
+    echo "State Directory: $STATE_DIR"
+    echo "Usage SQLite DB: $USAGE_DB_PATH"
+
+    if [[ "$current_version" != "none" ]]; then
+        local current_version_dir
+        current_version_dir=$(get_current_version_dir)
+        echo "Version Directory: $current_version_dir"
+
+        if [[ -f "${INSTALL_DIR}/config.yaml" ]]; then
+            echo "Configuration: Present"
+        else
+            echo "Configuration: Missing"
+        fi
+
+        if [[ -f "${INSTALL_DIR}/cli-proxy-api" ]]; then
+            echo "Executable: Present"
+        else
+            echo "Executable: Missing"
+        fi
+
+        if [[ -f "$USAGE_DB_PATH" ]]; then
+            echo "SQLite Usage DB: Present"
+        else
+            echo "SQLite Usage DB: Not created yet"
+        fi
+
+        if is_service_running; then
+            echo "Service: Running"
+        else
+            echo "Service: Stopped"
+        fi
+
+        if check_api_keys; then
+            echo "API Keys: Configured"
+        else
+            echo "API Keys: NOT CONFIGURED"
+        fi
+    else
+        echo "Status: Not installed"
+    fi
+}
+
+uninstall_cliproxyapi() {
+    if [[ ! -d "$INSTALL_DIR" ]]; then
+        log_warning "CLIProxyAPI installation directory not found: $INSTALL_DIR"
+        exit 0
+    fi
+
+    echo
+    log_warning "This will remove the entire installation, including:"
+    echo "  - binaries"
+    echo "  - config.yaml"
+    echo "  - state directory"
+    echo "  - SQLite usage database"
+    echo "  - cached management panel files"
+    echo
+    read -p "Are you sure you want to remove CLIProxyAPI? (y/N): " -n 1 -r
+    echo
+
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_info "Uninstallation cancelled"
+        exit 0
+    fi
+
+    stop_service || true
+    stop_cliproxyapi_processes || true
+    rm -rf "$INSTALL_DIR"
+    rm -f "$HOME/.config/systemd/user/${SERVICE_NAME}"
+    systemctl --user daemon-reload || true
+    log_success "CLIProxyAPI has been uninstalled successfully"
+}
+
+cleanup() {
+    local temp_files
+    temp_files=$(find /tmp -name "tmp.*" -user "$(whoami)" 2>/dev/null || true)
+    if [[ -n "$temp_files" ]]; then
+        echo "$temp_files" | xargs rm -f 2>/dev/null || true
+    fi
+}
+
+trap cleanup EXIT
+trap handle_error ERR
+
+main() {
+    case "${1:-install}" in
+        "install"|"upgrade")
+            install_cliproxyapi
+            ;;
+        "status")
+            show_status
+            ;;
+        "auth")
+            show_authentication_info
+            if is_installed; then
+                show_quick_start "$INSTALL_DIR"
+            fi
+            ;;
+        "check-config")
+            if is_installed; then
+                echo "Configuration Check"
+                echo "=================="
+                echo "Config file: ${INSTALL_DIR}/config.yaml"
+                echo "State dir: ${STATE_DIR}"
+                echo "Usage DB: ${USAGE_DB_PATH}"
+
+                if check_api_keys; then
+                    echo -e "API Keys: ${GREEN}Configured${NC}"
+                else
+                    echo -e "API Keys: ${RED}NOT CONFIGURED${NC}"
+                    show_api_key_setup
+                fi
+            else
+                log_error "CLIProxyAPI is not installed"
+            fi
+            ;;
+        "generate-key")
+            local new_key
+            new_key=$(generate_api_key)
+            echo "$new_key"
+            ;;
+        "uninstall")
+            uninstall_cliproxyapi
+            ;;
+        "-h"|"--help")
+            cat << EOF
+CLIProxyAPI Linux Installer
+
+Usage: $SCRIPT_NAME [COMMAND]
+
+Commands:
+  install, upgrade    Install or upgrade CLIProxyAPI (default)
+  status              Show current installation status
+  auth                Show authentication setup information
+  check-config        Check configuration and runtime state
+  generate-key        Generate a new API key
+  uninstall           Remove CLIProxyAPI completely
+  -h, --help          Show this help message
+
+SQLite usage persistence behavior:
+  - Uses WRITABLE_PATH=$INSTALL_DIR
+  - Uses USAGE_SQLITE_PATH=$USAGE_DB_PATH
+  - Preserves state/usage-statistics.sqlite during upgrades
+  - Preserves companion WAL/SHM files when present
+  - Keeps runtime state under $STATE_DIR
+  - Parses host/port from config.yaml for health checks
+  - Attempts rollback to the previous version if upgrade fails
+
+Examples:
+  $SCRIPT_NAME
+  $SCRIPT_NAME upgrade
+  $SCRIPT_NAME status
+
+EOF
+            ;;
+        *)
+            log_error "Unknown command: $1"
+            echo "Use '$SCRIPT_NAME --help' for usage information"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
