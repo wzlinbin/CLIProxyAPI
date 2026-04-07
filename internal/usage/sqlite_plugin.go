@@ -228,6 +228,7 @@ func (s *sqliteStore) prepare() error {
 			model TEXT NOT NULL,
 			requested_at TEXT NOT NULL,
 			latency_ms INTEGER NOT NULL DEFAULT 0,
+			api_key TEXT NOT NULL DEFAULT '',
 			source TEXT NOT NULL DEFAULT '',
 			auth_index TEXT NOT NULL DEFAULT '',
 			failed INTEGER NOT NULL DEFAULT 0,
@@ -241,6 +242,7 @@ func (s *sqliteStore) prepare() error {
 				api_name,
 				model,
 				requested_at,
+				api_key,
 				source,
 				auth_index,
 				failed,
@@ -266,6 +268,7 @@ func (s *sqliteStore) prepare() error {
 			model,
 			requested_at,
 			latency_ms,
+			api_key,
 			source,
 			auth_index,
 			failed,
@@ -274,7 +277,7 @@ func (s *sqliteStore) prepare() error {
 			reasoning_tokens,
 			cached_tokens,
 			total_tokens
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("usage sqlite: prepare insert statement: %w", err)
@@ -320,6 +323,7 @@ func (s *sqliteStore) InsertStoredRecord(stored storedUsageRecord) error {
 		stored.model,
 		formatSQLiteTimestamp(stored.timestamp),
 		stored.detail.LatencyMs,
+		stored.detail.APIKey,
 		stored.detail.Source,
 		stored.detail.AuthIndex,
 		boolToInt(stored.detail.Failed),
@@ -356,6 +360,7 @@ func (s *sqliteStore) LoadSnapshot(ctx context.Context) (StatisticsSnapshot, err
 			model,
 			requested_at,
 			latency_ms,
+			api_key,
 			source,
 			auth_index,
 			failed,
@@ -381,6 +386,7 @@ func (s *sqliteStore) LoadSnapshot(ctx context.Context) (StatisticsSnapshot, err
 			modelName       string
 			requestedAtText string
 			latencyMs       int64
+			apiKey          string
 			source          string
 			authIndex       string
 			failed          int
@@ -395,6 +401,7 @@ func (s *sqliteStore) LoadSnapshot(ctx context.Context) (StatisticsSnapshot, err
 			&modelName,
 			&requestedAtText,
 			&latencyMs,
+			&apiKey,
 			&source,
 			&authIndex,
 			&failed,
@@ -430,6 +437,7 @@ func (s *sqliteStore) LoadSnapshot(ctx context.Context) (StatisticsSnapshot, err
 		stats.recordImported(apiName, modelName, apiStatsValue, RequestDetail{
 			Timestamp: timestamp,
 			LatencyMs: latencyMs,
+			APIKey:    apiKey,
 			Source:    source,
 			AuthIndex: authIndex,
 			Failed:    failed != 0,
@@ -497,6 +505,7 @@ func normaliseStoredRecord(ctx context.Context, record coreusage.Record) storedU
 		detail: RequestDetail{
 			Timestamp: timestamp,
 			LatencyMs: normaliseLatency(record.Latency),
+			APIKey:    statsKey,
 			Source:    strings.TrimSpace(record.Source),
 			AuthIndex: strings.TrimSpace(record.AuthIndex),
 			Failed:    failed,
