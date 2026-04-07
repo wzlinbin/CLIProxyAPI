@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +27,7 @@ const (
 	defaultManagementReleaseURL  = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
 	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
 	managementAssetName          = "management.html"
+	opsBillingAssetName          = "ops-billing.html"
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
 	updateCheckInterval          = 3 * time.Hour
@@ -37,6 +37,9 @@ const (
 // ManagementFileName exposes the control panel asset filename.
 const ManagementFileName = managementAssetName
 
+// OpsBillingFileName exposes the standalone operations billing asset filename.
+const OpsBillingFileName = opsBillingAssetName
+
 var (
 	lastUpdateCheckMu   sync.Mutex
 	lastUpdateCheckTime time.Time
@@ -45,6 +48,8 @@ var (
 	schedulerConfigPath atomic.Value
 	sfGroup             singleflight.Group
 )
+
+var executablePathFunc = os.Executable
 
 // SetCurrentConfig stores the latest configuration snapshot for management asset decisions.
 func SetCurrentConfig(cfg *config.Config) {
@@ -58,17 +63,7 @@ func SetCurrentConfig(cfg *config.Config) {
 // StartAutoUpdater launches a background goroutine that periodically ensures the management asset is up to date.
 // It respects the disable-control-panel flag on every iteration and supports hot-reloaded configurations.
 func StartAutoUpdater(ctx context.Context, configFilePath string) {
-	configFilePath = strings.TrimSpace(configFilePath)
-	if configFilePath == "" {
-		log.Debug("management asset auto-updater skipped: empty config path")
-		return
-	}
-
-	schedulerConfigPath.Store(configFilePath)
-
-	schedulerOnce.Do(func() {
-		go runAutoUpdater(ctx)
-	})
+	log.Debug("management asset auto-updater disabled: management.html is served from local files only")
 }
 
 func runAutoUpdater(ctx context.Context) {
@@ -140,145 +135,62 @@ func StaticDir(configFilePath string) string {
 		return cleaned
 	}
 
-	if writable := util.WritablePath(); writable != "" {
-		return filepath.Join(writable, "static")
-	}
-
-	configFilePath = strings.TrimSpace(configFilePath)
-	if configFilePath == "" {
-		return ""
-	}
-
-	base := filepath.Dir(configFilePath)
-	fileInfo, err := os.Stat(configFilePath)
-	if err == nil {
-		if fileInfo.IsDir() {
-			base = configFilePath
-		}
-	}
-
-	return filepath.Join(base, "static")
+	return preferredStaticDir(configFilePath)
 }
 
 // FilePath resolves the absolute path to the management control panel asset.
 func FilePath(configFilePath string) string {
+	return AssetFilePath(configFilePath, ManagementFileName)
+}
+
+// AssetFilePath resolves the absolute path to a local management asset.
+func AssetFilePath(configFilePath string, assetName string) string {
 	if override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH")); override != "" {
 		cleaned := filepath.Clean(override)
-		if strings.EqualFold(filepath.Base(cleaned), managementAssetName) {
+		if strings.EqualFold(filepath.Base(cleaned), assetName) {
 			return cleaned
 		}
-		return filepath.Join(cleaned, ManagementFileName)
+		return filepath.Join(cleaned, assetName)
 	}
 
 	dir := StaticDir(configFilePath)
 	if dir == "" {
 		return ""
 	}
-	return filepath.Join(dir, ManagementFileName)
+	return filepath.Join(dir, assetName)
+}
+
+// ExistingFilePath returns the first existing management asset path from the known
+// candidate directories. This allows packaged executables to keep working even when
+// the current config path points elsewhere.
+func ExistingFilePath(configFilePath string) string {
+	return ExistingAssetFilePath(configFilePath, ManagementFileName)
+}
+
+// ExistingAssetFilePath returns the first existing path for the supplied asset.
+func ExistingAssetFilePath(configFilePath string, assetName string) string {
+	for _, candidate := range fileCandidates(configFilePath, assetName) {
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
 // It coalesces concurrent sync attempts and returns whether the asset exists after the sync attempt.
 func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	staticDir = strings.TrimSpace(staticDir)
 	if staticDir == "" {
-		log.Debug("management asset sync skipped: empty static directory")
+		log.Debug("management asset local lookup skipped: empty static directory")
 		return false
 	}
 	localPath := filepath.Join(staticDir, managementAssetName)
-
-	_, _, _ = sfGroup.Do(localPath, func() (interface{}, error) {
-		lastUpdateCheckMu.Lock()
-		now := time.Now()
-		timeSinceLastAttempt := now.Sub(lastUpdateCheckTime)
-		if !lastUpdateCheckTime.IsZero() && timeSinceLastAttempt < managementSyncMinInterval {
-			lastUpdateCheckMu.Unlock()
-			log.Debugf(
-				"management asset sync skipped by throttle: last attempt %v ago (interval %v)",
-				timeSinceLastAttempt.Round(time.Second),
-				managementSyncMinInterval,
-			)
-			return nil, nil
-		}
-		lastUpdateCheckTime = now
-		lastUpdateCheckMu.Unlock()
-
-		localFileMissing := false
-		if _, errStat := os.Stat(localPath); errStat != nil {
-			if errors.Is(errStat, os.ErrNotExist) {
-				localFileMissing = true
-			} else {
-				log.WithError(errStat).Debug("failed to stat local management asset")
-			}
-		}
-
-		if errMkdirAll := os.MkdirAll(staticDir, 0o755); errMkdirAll != nil {
-			log.WithError(errMkdirAll).Warn("failed to prepare static directory for management asset")
-			return nil, nil
-		}
-
-		releaseURL := resolveReleaseURL(panelRepository)
-		client := newHTTPClient(proxyURL)
-
-		localHash, err := fileSHA256(localPath)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				log.WithError(err).Debug("failed to read local management asset hash")
-			}
-			localHash = ""
-		}
-
-		asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL)
-		if err != nil {
-			if localFileMissing {
-				log.WithError(err).Warn("failed to fetch latest management release information, trying fallback page")
-				if ensureFallbackManagementHTML(ctx, client, localPath) {
-					return nil, nil
-				}
-				return nil, nil
-			}
-			log.WithError(err).Warn("failed to fetch latest management release information")
-			return nil, nil
-		}
-
-		if remoteHash != "" && localHash != "" && strings.EqualFold(remoteHash, localHash) {
-			log.Debug("management asset is already up to date")
-			return nil, nil
-		}
-
-		data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
-		if err != nil {
-			if localFileMissing {
-				log.WithError(err).Warn("failed to download management asset, trying fallback page")
-				if ensureFallbackManagementHTML(ctx, client, localPath) {
-					return nil, nil
-				}
-				return nil, nil
-			}
-			log.WithError(err).Warn("failed to download management asset")
-			return nil, nil
-		}
-
-		if remoteHash != "" && !strings.EqualFold(remoteHash, downloadedHash) {
-			log.Errorf("management asset digest mismatch: expected %s got %s — aborting update for safety", remoteHash, downloadedHash)
-			return nil, nil
-		}
-
-		if err = atomicWriteFile(localPath, data); err != nil {
-			log.WithError(err).Warn("failed to update management asset on disk")
-			return nil, nil
-		}
-
-		log.Infof("management asset updated successfully (hash=%s)", downloadedHash)
-		return nil, nil
-	})
-
-	_, err := os.Stat(localPath)
-	return err == nil
+	if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
+		return true
+	}
+	return false
 }
 
 func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, localPath string) bool {
@@ -472,4 +384,136 @@ func parseDigest(digest string) string {
 	}
 
 	return strings.ToLower(strings.TrimSpace(digest))
+}
+
+func fileCandidates(configFilePath string, assetName string) []string {
+	if override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH")); override != "" {
+		cleaned := filepath.Clean(override)
+		if strings.EqualFold(filepath.Base(cleaned), assetName) {
+			return []string{cleaned}
+		}
+		return []string{filepath.Join(cleaned, assetName)}
+	}
+
+	candidates := make([]string, 0, 4)
+	for _, baseDir := range candidateBaseDirs(configFilePath) {
+		candidates = append(candidates, filepath.Join(baseDir, "static", assetName))
+	}
+	if writable := util.WritablePath(); writable != "" {
+		candidates = append(candidates, filepath.Join(writable, "static", assetName))
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	unique := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		cleaned := filepath.Clean(candidate)
+		if _, exists := seen[cleaned]; exists {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		unique = append(unique, cleaned)
+	}
+	return unique
+}
+
+func preferredStaticDir(configFilePath string) string {
+	baseDirs := candidateBaseDirs(configFilePath)
+	localStaticDirs := make([]string, 0, len(baseDirs))
+	for _, baseDir := range baseDirs {
+		localStaticDirs = append(localStaticDirs, filepath.Join(baseDir, "static"))
+	}
+
+	for _, dir := range localStaticDirs {
+		if fileExists(filepath.Join(dir, ManagementFileName)) {
+			return dir
+		}
+	}
+
+	for _, dir := range localStaticDirs {
+		if directoryExists(dir) {
+			return dir
+		}
+	}
+
+	if writable := util.WritablePath(); writable != "" {
+		writableDir := filepath.Join(writable, "static")
+		if fileExists(filepath.Join(writableDir, ManagementFileName)) {
+			return writableDir
+		}
+		if directoryExists(writableDir) {
+			return writableDir
+		}
+	}
+
+	if len(localStaticDirs) > 0 {
+		return localStaticDirs[0]
+	}
+
+	if writable := util.WritablePath(); writable != "" {
+		return filepath.Join(writable, "static")
+	}
+
+	return ""
+}
+
+func candidateBaseDirs(configFilePath string) []string {
+	candidates := make([]string, 0, 3)
+
+	configFilePath = strings.TrimSpace(configFilePath)
+	if configFilePath != "" {
+		base := filepath.Dir(configFilePath)
+		if fileInfo, err := os.Stat(configFilePath); err == nil && fileInfo.IsDir() {
+			base = configFilePath
+		}
+		candidates = append(candidates, filepath.Clean(base))
+	}
+
+	if workingDir, err := os.Getwd(); err == nil && strings.TrimSpace(workingDir) != "" {
+		candidates = append(candidates, filepath.Clean(workingDir))
+	}
+
+	if executableDir := resolveExecutableDir(); executableDir != "" {
+		candidates = append(candidates, filepath.Clean(executableDir))
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	unique := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		unique = append(unique, candidate)
+	}
+
+	return unique
+}
+
+func resolveExecutableDir() string {
+	executablePath, err := executablePathFunc()
+	if err != nil || strings.TrimSpace(executablePath) == "" {
+		return ""
+	}
+
+	if resolvedPath, errEval := filepath.EvalSymlinks(executablePath); errEval == nil && strings.TrimSpace(resolvedPath) != "" {
+		executablePath = resolvedPath
+	}
+
+	return filepath.Dir(executablePath)
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func directoryExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }

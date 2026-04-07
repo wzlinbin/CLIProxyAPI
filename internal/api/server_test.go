@@ -233,3 +233,227 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestManagementControlPanelFallsBackToWorkingDirectoryStaticDir(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	t.Setenv("writable_path", "")
+	t.Setenv("MANAGEMENT_STATIC_PATH", "")
+
+	originalWD, errGetwd := os.Getwd()
+	if errGetwd != nil {
+		t.Fatalf("failed to get current working directory: %v", errGetwd)
+	}
+
+	workingDir := t.TempDir()
+	if errChdir := os.Chdir(workingDir); errChdir != nil {
+		t.Fatalf("failed to switch working directory: %v", errChdir)
+	}
+	defer func() {
+		if errChdirBack := os.Chdir(originalWD); errChdirBack != nil {
+			t.Fatalf("failed to restore working directory: %v", errChdirBack)
+		}
+	}()
+
+	staticDir := filepath.Join(workingDir, "static")
+	if errMkdirStatic := os.MkdirAll(staticDir, 0o755); errMkdirStatic != nil {
+		t.Fatalf("failed to create static dir: %v", errMkdirStatic)
+	}
+
+	expectedBody := "<html><body>fallback panel</body></html>"
+	if errWrite := os.WriteFile(filepath.Join(staticDir, "management.html"), []byte(expectedBody), 0o644); errWrite != nil {
+		t.Fatalf("failed to write fallback management asset: %v", errWrite)
+	}
+
+	server := newTestServer(t)
+	server.configFilePath = filepath.Join(t.TempDir(), "config", "config.yaml")
+
+	req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if body := rr.Body.String(); body != expectedBody {
+		t.Fatalf("unexpected body: got %q want %q", body, expectedBody)
+	}
+}
+
+func TestManagementControlPanelPrefersLocalStaticDirOverWritablePath(t *testing.T) {
+	t.Setenv("MANAGEMENT_STATIC_PATH", "")
+
+	originalWD, errGetwd := os.Getwd()
+	if errGetwd != nil {
+		t.Fatalf("failed to get current working directory: %v", errGetwd)
+	}
+
+	workingDir := t.TempDir()
+	if errChdir := os.Chdir(workingDir); errChdir != nil {
+		t.Fatalf("failed to switch working directory: %v", errChdir)
+	}
+	defer func() {
+		if errChdirBack := os.Chdir(originalWD); errChdirBack != nil {
+			t.Fatalf("failed to restore working directory: %v", errChdirBack)
+		}
+	}()
+
+	localStaticDir := filepath.Join(workingDir, "static")
+	if errMkdirLocal := os.MkdirAll(localStaticDir, 0o755); errMkdirLocal != nil {
+		t.Fatalf("failed to create local static dir: %v", errMkdirLocal)
+	}
+	localBody := "<html><body>local panel</body></html>"
+	if errWrite := os.WriteFile(filepath.Join(localStaticDir, "management.html"), []byte(localBody), 0o644); errWrite != nil {
+		t.Fatalf("failed to write local management asset: %v", errWrite)
+	}
+
+	writableDir := t.TempDir()
+	t.Setenv("WRITABLE_PATH", writableDir)
+	t.Setenv("writable_path", "")
+	writableStaticDir := filepath.Join(writableDir, "static")
+	if errMkdirWritable := os.MkdirAll(writableStaticDir, 0o755); errMkdirWritable != nil {
+		t.Fatalf("failed to create writable static dir: %v", errMkdirWritable)
+	}
+	if errWrite := os.WriteFile(filepath.Join(writableStaticDir, "management.html"), []byte("<html><body>writable panel</body></html>"), 0o644); errWrite != nil {
+		t.Fatalf("failed to write writable management asset: %v", errWrite)
+	}
+
+	server := newTestServer(t)
+	server.configFilePath = filepath.Join(t.TempDir(), "config", "config.yaml")
+
+	req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if body := rr.Body.String(); body != localBody {
+		t.Fatalf("unexpected body: got %q want %q", body, localBody)
+	}
+}
+
+func TestManagementControlPanelReturnsNotFoundWhenLocalAssetMissing(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	t.Setenv("writable_path", "")
+	t.Setenv("MANAGEMENT_STATIC_PATH", "")
+
+	originalWD, errGetwd := os.Getwd()
+	if errGetwd != nil {
+		t.Fatalf("failed to get current working directory: %v", errGetwd)
+	}
+
+	workingDir := t.TempDir()
+	if errChdir := os.Chdir(workingDir); errChdir != nil {
+		t.Fatalf("failed to switch working directory: %v", errChdir)
+	}
+	defer func() {
+		if errChdirBack := os.Chdir(originalWD); errChdirBack != nil {
+			t.Fatalf("failed to restore working directory: %v", errChdirBack)
+		}
+	}()
+
+	server := newTestServer(t)
+	server.configFilePath = filepath.Join(t.TempDir(), "config", "config.yaml")
+
+	req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+}
+
+func TestManagementControlPanelDisablesBrowserCache(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	t.Setenv("writable_path", "")
+	t.Setenv("MANAGEMENT_STATIC_PATH", "")
+
+	originalWD, errGetwd := os.Getwd()
+	if errGetwd != nil {
+		t.Fatalf("failed to get current working directory: %v", errGetwd)
+	}
+
+	workingDir := t.TempDir()
+	if errChdir := os.Chdir(workingDir); errChdir != nil {
+		t.Fatalf("failed to switch working directory: %v", errChdir)
+	}
+	defer func() {
+		if errChdirBack := os.Chdir(originalWD); errChdirBack != nil {
+			t.Fatalf("failed to restore working directory: %v", errChdirBack)
+		}
+	}()
+
+	staticDir := filepath.Join(workingDir, "static")
+	if errMkdirStatic := os.MkdirAll(staticDir, 0o755); errMkdirStatic != nil {
+		t.Fatalf("failed to create static dir: %v", errMkdirStatic)
+	}
+	if errWrite := os.WriteFile(filepath.Join(staticDir, "management.html"), []byte("<html><body>panel</body></html>"), 0o644); errWrite != nil {
+		t.Fatalf("failed to write management asset: %v", errWrite)
+	}
+
+	server := newTestServer(t)
+	server.configFilePath = filepath.Join(t.TempDir(), "config", "config.yaml")
+
+	req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got := rr.Header().Get("Cache-Control"); got != "no-store, no-cache, must-revalidate, max-age=0" {
+		t.Fatalf("unexpected Cache-Control header: got %q", got)
+	}
+	if got := rr.Header().Get("Pragma"); got != "no-cache" {
+		t.Fatalf("unexpected Pragma header: got %q", got)
+	}
+	if got := rr.Header().Get("Expires"); got != "0" {
+		t.Fatalf("unexpected Expires header: got %q", got)
+	}
+}
+
+func TestOpsBillingPageServesStandaloneAsset(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	t.Setenv("writable_path", "")
+	t.Setenv("MANAGEMENT_STATIC_PATH", "")
+
+	originalWD, errGetwd := os.Getwd()
+	if errGetwd != nil {
+		t.Fatalf("failed to get current working directory: %v", errGetwd)
+	}
+
+	workingDir := t.TempDir()
+	if errChdir := os.Chdir(workingDir); errChdir != nil {
+		t.Fatalf("failed to switch working directory: %v", errChdir)
+	}
+	defer func() {
+		if errChdirBack := os.Chdir(originalWD); errChdirBack != nil {
+			t.Fatalf("failed to restore working directory: %v", errChdirBack)
+		}
+	}()
+
+	staticDir := filepath.Join(workingDir, "static")
+	if errMkdirStatic := os.MkdirAll(staticDir, 0o755); errMkdirStatic != nil {
+		t.Fatalf("failed to create static dir: %v", errMkdirStatic)
+	}
+
+	expectedBody := "<html><body>ops billing</body></html>"
+	if errWrite := os.WriteFile(filepath.Join(staticDir, "ops-billing.html"), []byte(expectedBody), 0o644); errWrite != nil {
+		t.Fatalf("failed to write ops billing asset: %v", errWrite)
+	}
+
+	server := newTestServer(t)
+	server.configFilePath = filepath.Join(t.TempDir(), "config", "config.yaml")
+
+	req := httptest.NewRequest(http.MethodGet, "/ops-billing.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if body := rr.Body.String(); body != expectedBody {
+		t.Fatalf("unexpected body: got %q want %q", body, expectedBody)
+	}
+}

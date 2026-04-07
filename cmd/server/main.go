@@ -383,12 +383,7 @@ func main() {
 		configFilePath = configPath
 		cfg, err = config.LoadConfigOptional(configPath, isCloudDeploy)
 	} else {
-		wd, err = os.Getwd()
-		if err != nil {
-			log.Errorf("failed to get working directory: %v", err)
-			return
-		}
-		configFilePath = filepath.Join(wd, "config.yaml")
+		configFilePath = resolveDefaultConfigPath()
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 	}
 	if err != nil {
