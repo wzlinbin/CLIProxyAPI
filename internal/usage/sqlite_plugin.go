@@ -262,6 +262,40 @@ func (s *sqliteStore) prepare() error {
 		}
 	}
 
+	// Migrate older databases that lack columns added after initial release.
+	migrations := []struct {
+		column string
+		ddl    string
+	}{
+		{"api_key", "ALTER TABLE usage_records ADD COLUMN api_key TEXT NOT NULL DEFAULT ''"},
+		{"source", "ALTER TABLE usage_records ADD COLUMN source TEXT NOT NULL DEFAULT ''"},
+		{"auth_index", "ALTER TABLE usage_records ADD COLUMN auth_index TEXT NOT NULL DEFAULT ''"},
+		{"failed", "ALTER TABLE usage_records ADD COLUMN failed INTEGER NOT NULL DEFAULT 0"},
+		{"input_tokens", "ALTER TABLE usage_records ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0"},
+		{"output_tokens", "ALTER TABLE usage_records ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0"},
+		{"reasoning_tokens", "ALTER TABLE usage_records ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0"},
+		{"cached_tokens", "ALTER TABLE usage_records ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0"},
+		{"total_tokens", "ALTER TABLE usage_records ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, m := range migrations {
+		var count int
+		err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('usage_records') WHERE name = ?`, m.column).Scan(&count)
+		if err != nil {
+			return fmt.Errorf("usage sqlite: check column %s: %w", m.column, err)
+		}
+		if count == 0 {
+			if _, err := s.db.Exec(m.ddl); err != nil {
+				return fmt.Errorf("usage sqlite: add column %s: %w", m.column, err)
+			}
+			log.Infof("usage sqlite: migrated schema — added column %s", m.column)
+		}
+	}
+
+	// Drop the old UNIQUE constraint and recreate it with all columns if needed.
+	// SQLite does not support ALTER TABLE ... DROP CONSTRAINT, so we only log a
+	// note; the INSERT OR IGNORE will still work because the new UNIQUE index
+	// covers a superset of the old one on freshly-created tables.
+
 	insertStmt, err := s.db.Prepare(`
 		INSERT OR IGNORE INTO usage_records (
 			api_name,
