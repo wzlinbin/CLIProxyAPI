@@ -322,6 +322,9 @@ func (s *Server) setupRoutes() {
 	})
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET("/ops-billing.html", func(c *gin.Context) {
+		s.serveManagementAsset(c, managementasset.OpsBillingFileName)
+	})
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -658,12 +661,19 @@ func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) serveManagementControlPanel(c *gin.Context) {
+	s.serveManagementAsset(c, managementasset.ManagementFileName)
+}
+
+func (s *Server) serveManagementAsset(c *gin.Context, assetName string) {
 	cfg := s.cfg
 	if cfg == nil || cfg.RemoteManagement.DisableControlPanel {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-	filePath := managementasset.FilePath(s.configFilePath)
+	filePath := managementasset.ExistingAssetFilePath(s.configFilePath, assetName)
+	if strings.TrimSpace(filePath) == "" {
+		filePath = managementasset.AssetFilePath(s.configFilePath, assetName)
+	}
 	if strings.TrimSpace(filePath) == "" {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
@@ -671,12 +681,8 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
-			// Synchronously ensure management.html is available with a detached context.
-			// Control panel bootstrap should not be canceled by client disconnects.
-			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
-				c.AbortWithStatus(http.StatusNotFound)
-				return
-			}
+			c.AbortWithStatus(http.StatusNotFound)
+			return
 		} else {
 			log.WithError(err).Error("failed to stat management control panel asset")
 			c.AbortWithStatus(http.StatusInternalServerError)
@@ -684,6 +690,11 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
+	// Always bypass browser caches for the single-file management panel so UI
+	// updates are reflected immediately after replacing local static assets.
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
 	c.File(filePath)
 }
 

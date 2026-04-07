@@ -20,6 +20,7 @@ var statisticsEnabled atomic.Bool
 func init() {
 	statisticsEnabled.Store(true)
 	coreusage.RegisterPlugin(NewLoggerPlugin())
+	coreusage.RegisterPlugin(defaultSQLitePlugin)
 }
 
 // LoggerPlugin collects in-memory request statistics for usage analysis.
@@ -91,6 +92,7 @@ type modelStats struct {
 type RequestDetail struct {
 	Timestamp time.Time  `json:"timestamp"`
 	LatencyMs int64      `json:"latency_ms"`
+	APIKey    string     `json:"api_key"`
 	Source    string     `json:"source"`
 	AuthIndex string     `json:"auth_index"`
 	Tokens    TokenStats `json:"tokens"`
@@ -200,6 +202,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.updateAPIStats(stats, modelName, RequestDetail{
 		Timestamp: timestamp,
 		LatencyMs: normaliseLatency(record.Latency),
+		APIKey:    statsKey,
 		Source:    record.Source,
 		AuthIndex: record.AuthIndex,
 		Tokens:    detail,
@@ -384,10 +387,11 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
+		detail.APIKey,
 		detail.Source,
 		detail.AuthIndex,
 		detail.Failed,
