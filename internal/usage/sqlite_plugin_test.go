@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -183,3 +184,62 @@ func TestSQLiteStoreInsertRecordIgnoresCanceledContext(t *testing.T) {
 		t.Fatalf("TotalRequests = %d, want 1", snapshot.TotalRequests)
 	}
 }
+
+func TestEnableSQLitePersistenceRecoversFromMalformedDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	if err := os.WriteFile(path, []byte("not a sqlite database"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(main) error = %v", err)
+	}
+	if err := os.WriteFile(path+"-wal", []byte("wal"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(wal) error = %v", err)
+	}
+	if err := os.WriteFile(path+"-shm", []byte("shm"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(shm) error = %v", err)
+	}
+
+	oldStats := defaultRequestStatistics
+	defaultRequestStatistics = NewRequestStatistics()
+	defer func() {
+		defaultRequestStatistics = oldStats
+		if err := DisableSQLitePersistence(); err != nil {
+			t.Fatalf("DisableSQLitePersistence() error = %v", err)
+		}
+	}()
+
+	t.Setenv("USAGE_SQLITE_PATH", path)
+	if err := EnableSQLitePersistence(context.Background(), "", nil); err != nil {
+		t.Fatalf("EnableSQLitePersistence() error = %v", err)
+	}
+
+	matches, err := filepath.Glob(path + ".corrupt-*")
+	if err != nil {
+		t.Fatalf("filepath.Glob() error = %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("backup main db files = %d, want 1", len(matches))
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("new sqlite database missing: %v", err)
+	}
+
+	store := defaultSQLitePlugin.currentStore()
+	if store == nil {
+		t.Fatalf("expected active sqlite store after recovery")
+	}
+	record := coreusage.Record{
+		APIKey:      "recovered-key",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 4, 10, 13, 0, 0, 0, time.UTC),
+	}
+	if err := store.InsertRecord(context.Background(), record); err != nil {
+		t.Fatalf("InsertRecord() after recovery error = %v", err)
+	}
+	snapshot, err := store.LoadSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("LoadSnapshot() after recovery error = %v", err)
+	}
+	if snapshot.TotalRequests != 1 {
+		t.Fatalf("TotalRequests = %d, want 1", snapshot.TotalRequests)
+	}
+}
+

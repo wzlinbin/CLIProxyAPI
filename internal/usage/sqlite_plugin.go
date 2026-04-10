@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,18 +49,8 @@ func EnableSQLitePersistence(ctx context.Context, configFilePath string, cfg *co
 	if path == "" {
 		return nil
 	}
-	store, err := newSQLiteStore(path)
+	store, pruned, snapshot, err := enableSQLitePersistenceWithRecovery(ctx, path, true)
 	if err != nil {
-		return err
-	}
-	pruned, err := store.Prune(ctx)
-	if err != nil {
-		_ = store.Close()
-		return err
-	}
-	snapshot, err := store.LoadSnapshot(ctx)
-	if err != nil {
-		_ = store.Close()
 		return err
 	}
 	result := defaultRequestStatistics.MergeSnapshot(snapshot)
@@ -76,6 +67,100 @@ func EnableSQLitePersistence(ctx context.Context, configFilePath string, cfg *co
 		store.retention.RetentionDays,
 		store.retention.MaxRows,
 	)
+	return nil
+}
+
+func enableSQLitePersistenceWithRecovery(ctx context.Context, path string, allowRecover bool) (*sqliteStore, int64, StatisticsSnapshot, error) {
+	store, pruned, snapshot, err := openSQLitePersistenceStore(ctx, path)
+	if err == nil {
+		return store, pruned, snapshot, nil
+	}
+	if !allowRecover || !isSQLiteCorruptionError(err) {
+		return nil, 0, StatisticsSnapshot{}, err
+	}
+
+	if recoverErr := rotateCorruptSQLiteDatabase(path); recoverErr != nil {
+		return nil, 0, StatisticsSnapshot{}, fmt.Errorf("usage sqlite: recover corrupt database: %w (original error: %v)", recoverErr, err)
+	}
+	log.WithError(err).Warnf("usage sqlite corruption detected at %s; moved corrupt database aside and recreating a fresh store", path)
+
+	store, pruned, snapshot, err = openSQLitePersistenceStore(ctx, path)
+	if err != nil {
+		return nil, 0, StatisticsSnapshot{}, err
+	}
+	return store, pruned, snapshot, nil
+}
+
+func openSQLitePersistenceStore(ctx context.Context, path string) (*sqliteStore, int64, StatisticsSnapshot, error) {
+	store, err := newSQLiteStore(path)
+	if err != nil {
+		return nil, 0, StatisticsSnapshot{}, err
+	}
+	pruned, err := store.Prune(ctx)
+	if err != nil {
+		_ = store.Close()
+		return nil, 0, StatisticsSnapshot{}, err
+	}
+	snapshot, err := store.LoadSnapshot(ctx)
+	if err != nil {
+		_ = store.Close()
+		return nil, 0, StatisticsSnapshot{}, err
+	}
+	return store, pruned, snapshot, nil
+}
+
+func isSQLiteCorruptionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"database disk image is malformed",
+		"file is not a database",
+		"malformed database schema",
+		"database malformed",
+		"database corrupt",
+		"malformed",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func rotateCorruptSQLiteDatabase(path string) error {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	if cleaned == "" {
+		return fmt.Errorf("usage sqlite: empty database path")
+	}
+
+	suffix := ".corrupt-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+	renamed := 0
+	for _, candidate := range []string{
+		cleaned,
+		cleaned + "-wal",
+		cleaned + "-shm",
+		cleaned + "-journal",
+	} {
+		info, err := os.Stat(candidate)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("usage sqlite: stat corrupt database file %s: %w", candidate, err)
+		}
+		if info.IsDir() {
+			continue
+		}
+		if err := os.Rename(candidate, candidate+suffix); err != nil {
+			return fmt.Errorf("usage sqlite: move corrupt database file %s: %w", candidate, err)
+		}
+		renamed++
+	}
+	if renamed == 0 {
+		return fmt.Errorf("usage sqlite: no database files found at %s", cleaned)
+	}
 	return nil
 }
 
