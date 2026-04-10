@@ -48,6 +48,7 @@ PR说明.md
 .codex/*
 .claude/*
 .qwen/*
+.gocache/
 .gemini/*
 .serena/*
 .agent/*
