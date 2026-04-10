@@ -1,6 +1,9 @@
 # Binaries
 cli-proxy-api
 *.exe
+*.1exe
+*-linux-amd64
+cliproxyapi-installer
 
 # Configuration
 config.yaml
@@ -12,11 +15,18 @@ logs/*
 conv/*
 temp/*
 refs/*
+.fix_request_events_api_key_ui.py
+compile_linux.bat
+compile_linux.sh
 
 # Storage backends
 pgstore/*
 gitstore/*
 objectstore/*
+state/*.sqlite
+state/*.sqlite-shm
+state/*.sqlite-wal
+state/*.sqlite-journal
 
 # Static assets
 static/*
@@ -30,12 +40,14 @@ docs/*
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+PR说明.md
 
 # Tooling metadata
 .vscode/*
 .worktrees/
 .codex/*
 .claude/*
+.qwen/*
 .gemini/*
 .serena/*
 .agent/*
