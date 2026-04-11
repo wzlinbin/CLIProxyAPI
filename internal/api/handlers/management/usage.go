@@ -3,6 +3,7 @@ package management
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +19,10 @@ type usageExportPayload struct {
 type usageImportPayload struct {
 	Version int                      `json:"version"`
 	Usage   usage.StatisticsSnapshot `json:"usage"`
+}
+
+type billingPricesPayload struct {
+	Prices []usage.BillingModelPrice `json:"prices"`
 }
 
 // GetUsageStatistics returns the in-memory request statistics snapshot.
@@ -76,4 +81,45 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		"total_requests":  snapshot.TotalRequests,
 		"failed_requests": snapshot.FailureCount,
 	})
+}
+
+func (h *Handler) GetBillingPrices(c *gin.Context) {
+	prices, err := usage.LoadBillingModelPrices(c.Request.Context(), h.configFilePath, h.cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"prices": prices})
+}
+
+func (h *Handler) PutBillingPrices(c *gin.Context) {
+	var body billingPricesPayload
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	cleaned := make([]usage.BillingModelPrice, 0, len(body.Prices))
+	seen := make(map[string]struct{})
+	for _, item := range body.Prices {
+		item.ModelName = strings.TrimSpace(item.ModelName)
+		if item.ModelName == "" {
+			continue
+		}
+		if item.InputPricePerM < 0 || item.OutputPricePerM < 0 || item.ReasoningPricePerM < 0 || item.CachedPricePerM < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "price values must be >= 0"})
+			return
+		}
+		key := strings.ToLower(item.ModelName)
+		if _, exists := seen[key]; exists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "duplicate model_name"})
+			return
+		}
+		seen[key] = struct{}{}
+		cleaned = append(cleaned, item)
+	}
+	if err := usage.SaveBillingModelPrices(c.Request.Context(), h.configFilePath, h.cfg, cleaned); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "prices": cleaned})
 }

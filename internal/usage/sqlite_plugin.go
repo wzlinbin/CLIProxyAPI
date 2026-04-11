@@ -42,6 +42,15 @@ type sqliteRetentionSettings struct {
 	MaxRows       int
 }
 
+type BillingModelPrice struct {
+	ModelName          string  `json:"model_name"`
+	InputPricePerM     float64 `json:"input_price_per_m_tokens"`
+	OutputPricePerM    float64 `json:"output_price_per_m_tokens"`
+	ReasoningPricePerM float64 `json:"reasoning_price_per_m_tokens"`
+	CachedPricePerM    float64 `json:"cached_price_per_m_tokens"`
+	UpdatedAt          string  `json:"updated_at,omitempty"`
+}
+
 // EnableSQLitePersistence opens the usage SQLite database, loads historical records,
 // and enables background persistence for newly published usage events.
 func EnableSQLitePersistence(ctx context.Context, configFilePath string, cfg *config.Config) error {
@@ -405,6 +414,141 @@ func (s *sqliteStore) prepare() error {
 	return nil
 }
 
+func (s *sqliteStore) ensureBillingPriceSchema() error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("usage sqlite: database not initialized")
+	}
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS billing_model_prices (
+			model_name TEXT PRIMARY KEY,
+			input_price_per_m_tokens REAL NOT NULL DEFAULT 0,
+			output_price_per_m_tokens REAL NOT NULL DEFAULT 0,
+			reasoning_price_per_m_tokens REAL NOT NULL DEFAULT 0,
+			cached_price_per_m_tokens REAL NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_billing_model_prices_updated_at ON billing_model_prices(updated_at)`,
+	}
+	for _, stmt := range statements {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("usage sqlite: migrate billing price schema: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *sqliteStore) LoadBillingModelPrices(ctx context.Context) ([]BillingModelPrice, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	if err := s.ensureBillingPriceSchema(); err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT model_name, input_price_per_m_tokens, output_price_per_m_tokens, reasoning_price_per_m_tokens, cached_price_per_m_tokens, updated_at
+		FROM billing_model_prices
+		ORDER BY model_name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("usage sqlite: query billing prices: %w", err)
+	}
+	defer rows.Close()
+	prices := make([]BillingModelPrice, 0)
+	for rows.Next() {
+		var item BillingModelPrice
+		if err := rows.Scan(&item.ModelName, &item.InputPricePerM, &item.OutputPricePerM, &item.ReasoningPricePerM, &item.CachedPricePerM, &item.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("usage sqlite: scan billing price: %w", err)
+		}
+		prices = append(prices, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("usage sqlite: iterate billing prices: %w", err)
+	}
+	return prices, nil
+}
+
+func (s *sqliteStore) SaveBillingModelPrices(ctx context.Context, prices []BillingModelPrice) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if err := s.ensureBillingPriceSchema(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("usage sqlite: begin billing price tx: %w", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM billing_model_prices`); err != nil {
+		return fmt.Errorf("usage sqlite: clear billing prices: %w", err)
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO billing_model_prices (
+			model_name,
+			input_price_per_m_tokens,
+			output_price_per_m_tokens,
+			reasoning_price_per_m_tokens,
+			cached_price_per_m_tokens,
+			updated_at
+		) VALUES (?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("usage sqlite: prepare billing price statement: %w", err)
+	}
+	for _, item := range prices {
+		if _, err := stmt.ExecContext(ctx, strings.TrimSpace(item.ModelName), item.InputPricePerM, item.OutputPricePerM, item.ReasoningPricePerM, item.CachedPricePerM, formatSQLiteTimestamp(time.Now().UTC())); err != nil {
+			_ = stmt.Close()
+			return fmt.Errorf("usage sqlite: insert billing price: %w", err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		return fmt.Errorf("usage sqlite: close billing price statement: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("usage sqlite: commit billing price tx: %w", err)
+	}
+	tx = nil
+	return nil
+}
+
+func LoadBillingModelPrices(ctx context.Context, configFilePath string, cfg *config.Config) ([]BillingModelPrice, error) {
+	path := ResolveSQLitePersistencePath(configFilePath, cfg)
+	if strings.TrimSpace(path) == "" {
+		return []BillingModelPrice{}, nil
+	}
+	store, err := newSQLiteStore(path)
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	return store.LoadBillingModelPrices(ctx)
+}
+
+func SaveBillingModelPrices(ctx context.Context, configFilePath string, cfg *config.Config, prices []BillingModelPrice) error {
+	path := ResolveSQLitePersistencePath(configFilePath, cfg)
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("usage sqlite: billing price persistence path is empty")
+	}
+	store, err := newSQLiteStore(path)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return store.SaveBillingModelPrices(ctx, prices)
+}
+
 func (s *sqliteStore) Close() error {
 	if s == nil {
 		return nil
@@ -618,8 +762,8 @@ func normaliseStoredRecord(ctx context.Context, record coreusage.Record) storedU
 		failed = !resolveSuccess(ctx)
 	}
 	return storedUsageRecord{
-		apiName: statsKey,
-		model:   modelName,
+		apiName:   statsKey,
+		model:     modelName,
 		timestamp: timestamp,
 		detail: RequestDetail{
 			Timestamp: timestamp,

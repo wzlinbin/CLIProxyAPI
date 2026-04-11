@@ -243,3 +243,50 @@ func TestEnableSQLitePersistenceRecoversFromMalformedDatabase(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreBillingPricesRoundTrip(t *testing.T) {
+	store, err := newSQLiteStore(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("newSQLiteStore() error = %v", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("store.Close() error = %v", err)
+		}
+	}()
+
+	prices := []BillingModelPrice{
+		{ModelName: "gpt-5.4", InputPricePerM: 2.5, OutputPricePerM: 10, ReasoningPricePerM: 1.2, CachedPricePerM: 0.25},
+		{ModelName: "claude-sonnet-4", InputPricePerM: 3, OutputPricePerM: 15, ReasoningPricePerM: 0, CachedPricePerM: 0.3},
+	}
+	if err := store.SaveBillingModelPrices(context.Background(), prices); err != nil {
+		t.Fatalf("SaveBillingModelPrices() error = %v", err)
+	}
+	loaded, err := store.LoadBillingModelPrices(context.Background())
+	if err != nil {
+		t.Fatalf("LoadBillingModelPrices() error = %v", err)
+	}
+	if len(loaded) != 2 {
+		t.Fatalf("len(loaded) = %d, want 2", len(loaded))
+	}
+	if loaded[0].ModelName != "claude-sonnet-4" || loaded[1].ModelName != "gpt-5.4" {
+		t.Fatalf("unexpected model ordering/content: %#v", loaded)
+	}
+	if loaded[1].InputPricePerM != 2.5 || loaded[1].OutputPricePerM != 10 {
+		t.Fatalf("unexpected loaded pricing: %#v", loaded[1])
+	}
+
+	updated := []BillingModelPrice{{ModelName: "gpt-5.4", InputPricePerM: 1, OutputPricePerM: 2}}
+	if err := store.SaveBillingModelPrices(context.Background(), updated); err != nil {
+		t.Fatalf("SaveBillingModelPrices(update) error = %v", err)
+	}
+	loaded, err = store.LoadBillingModelPrices(context.Background())
+	if err != nil {
+		t.Fatalf("LoadBillingModelPrices(after update) error = %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].ModelName != "gpt-5.4" {
+		t.Fatalf("unexpected updated pricing rows: %#v", loaded)
+	}
+	if loaded[0].InputPricePerM != 1 || loaded[0].OutputPricePerM != 2 {
+		t.Fatalf("unexpected updated pricing values: %#v", loaded[0])
+	}
+}
