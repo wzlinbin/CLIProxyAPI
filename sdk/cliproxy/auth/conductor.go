@@ -2916,6 +2916,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(routeModel string, opt
 		return nil
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	requestedPool := requestedPoolFromMetadata(opts.Metadata)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var known []creditsCandidateEntry
@@ -2925,6 +2926,9 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(routeModel string, opt
 			continue
 		}
 		if pinnedAuthID != "" && auth.ID != pinnedAuthID {
+			continue
+		}
+		if !authMatchesRequestedPool(auth, requestedPool) {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
