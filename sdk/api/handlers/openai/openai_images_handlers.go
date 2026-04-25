@@ -549,6 +549,8 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 
 func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, errs <-chan *interfaces.ErrorMessage, responseFormat string) ([]byte, *interfaces.ErrorMessage) {
 	acc := &sseFrameAccumulator{}
+	var itemResults []imageCallResult
+	firstMeta := imageCallResult{}
 
 	processFrame := func(frame []byte) ([]byte, bool, *interfaces.ErrorMessage) {
 		for _, line := range bytes.Split(frame, []byte("\n")) {
@@ -567,22 +569,34 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("invalid SSE data JSON")}
 			}
 
-			if gjson.GetBytes(payload, "type").String() != "response.completed" {
-				continue
+			switch gjson.GetBytes(payload, "type").String() {
+			case "response.output_item.done":
+				entry, ok := extractImageCallResult(gjson.GetBytes(payload, "item"))
+				if !ok {
+					continue
+				}
+				if len(itemResults) == 0 {
+					firstMeta = entry
+				}
+				itemResults = append(itemResults, entry)
+			case "response.completed":
+				results, createdAt, usageRaw, completedFirstMeta, err := extractImagesFromResponsesCompleted(payload)
+				if err != nil {
+					return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+				}
+				if len(results) == 0 {
+					results = itemResults
+					completedFirstMeta = firstMeta
+				}
+				if len(results) == 0 {
+					return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")}
+				}
+				out, err := buildImagesAPIResponse(results, createdAt, usageRaw, completedFirstMeta, responseFormat)
+				if err != nil {
+					return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: err}
+				}
+				return out, true, nil
 			}
-
-			results, createdAt, usageRaw, firstMeta, err := extractImagesFromResponsesCompleted(payload)
-			if err != nil {
-				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
-			}
-			if len(results) == 0 {
-				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")}
-			}
-			out, err := buildImagesAPIResponse(results, createdAt, usageRaw, firstMeta, responseFormat)
-			if err != nil {
-				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: err}
-			}
-			return out, true, nil
 		}
 		return nil, false, nil
 	}
@@ -618,6 +632,24 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 	}
 }
 
+func extractImageCallResult(item gjson.Result) (imageCallResult, bool) {
+	if item.Get("type").String() != "image_generation_call" {
+		return imageCallResult{}, false
+	}
+	res := strings.TrimSpace(item.Get("result").String())
+	if res == "" {
+		return imageCallResult{}, false
+	}
+	return imageCallResult{
+		Result:        res,
+		RevisedPrompt: strings.TrimSpace(item.Get("revised_prompt").String()),
+		OutputFormat:  strings.TrimSpace(item.Get("output_format").String()),
+		Size:          strings.TrimSpace(item.Get("size").String()),
+		Background:    strings.TrimSpace(item.Get("background").String()),
+		Quality:       strings.TrimSpace(item.Get("quality").String()),
+	}, true
+}
+
 func extractImagesFromResponsesCompleted(payload []byte) (results []imageCallResult, createdAt int64, usageRaw []byte, firstMeta imageCallResult, err error) {
 	if gjson.GetBytes(payload, "type").String() != "response.completed" {
 		return nil, 0, nil, imageCallResult{}, fmt.Errorf("unexpected event type")
@@ -631,20 +663,9 @@ func extractImagesFromResponsesCompleted(payload []byte) (results []imageCallRes
 	output := gjson.GetBytes(payload, "response.output")
 	if output.IsArray() {
 		for _, item := range output.Array() {
-			if item.Get("type").String() != "image_generation_call" {
+			entry, ok := extractImageCallResult(item)
+			if !ok {
 				continue
-			}
-			res := strings.TrimSpace(item.Get("result").String())
-			if res == "" {
-				continue
-			}
-			entry := imageCallResult{
-				Result:        res,
-				RevisedPrompt: strings.TrimSpace(item.Get("revised_prompt").String()),
-				OutputFormat:  strings.TrimSpace(item.Get("output_format").String()),
-				Size:          strings.TrimSpace(item.Get("size").String()),
-				Background:    strings.TrimSpace(item.Get("background").String()),
-				Quality:       strings.TrimSpace(item.Get("quality").String()),
 			}
 			if len(results) == 0 {
 				firstMeta = entry
@@ -772,6 +793,7 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 
 func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, firstChunk []byte, responseFormat string, streamPrefix string, writeEvent func(string, []byte)) {
 	acc := &sseFrameAccumulator{}
+	var itemResults []imageCallResult
 
 	responseFormat = strings.ToLower(strings.TrimSpace(responseFormat))
 	if responseFormat == "" {
@@ -806,6 +828,11 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 			}
 
 			switch gjson.GetBytes(payload, "type").String() {
+			case "response.output_item.done":
+				entry, ok := extractImageCallResult(gjson.GetBytes(payload, "item"))
+				if ok {
+					itemResults = append(itemResults, entry)
+				}
 			case "response.image_generation_call.partial_image":
 				b64 := strings.TrimSpace(gjson.GetBytes(payload, "partial_image_b64").String())
 				if b64 == "" {
@@ -829,6 +856,9 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 				if err != nil {
 					emitError(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 					return true
+				}
+				if len(results) == 0 {
+					results = itemResults
 				}
 				if len(results) == 0 {
 					emitError(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")})
