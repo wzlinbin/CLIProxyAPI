@@ -375,6 +375,9 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/ops-billing.html", func(c *gin.Context) {
 		s.serveManagementAsset(c, managementasset.OpsBillingFileName)
 	})
+	s.engine.GET("/ops-billing-inline-check.js", func(c *gin.Context) {
+		s.serveManagementAsset(c, "ops-billing-inline-check.js")
+	})
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -540,6 +543,9 @@ func (s *Server) registerManagementRoutes() {
 	mgmt := s.engine.Group("/v0/management")
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
+		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
+		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/billing-prices", s.mgmt.GetBillingPrices)
 		mgmt.PUT("/billing-prices", s.mgmt.PutBillingPrices)
 		mgmt.PATCH("/billing-prices", s.mgmt.PutBillingPrices)

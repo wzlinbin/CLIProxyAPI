@@ -111,8 +111,15 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	legacyReq.Header.Set("Authorization", "Bearer test-management-key")
 	legacyRR := httptest.NewRecorder()
 	server.engine.ServeHTTP(legacyRR, legacyReq)
-	if legacyRR.Code != http.StatusNotFound {
-		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusNotFound, legacyRR.Body.String())
+	if legacyRR.Code != http.StatusOK {
+		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusOK, legacyRR.Body.String())
+	}
+	var legacyPayload map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(legacyRR.Body.Bytes(), &legacyPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal legacy usage response: %v body=%s", errUnmarshal, legacyRR.Body.String())
+	}
+	if _, ok := legacyPayload["usage"]; !ok {
+		t.Fatalf("legacy usage response missing usage field: %s", legacyRR.Body.String())
 	}
 
 	authReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
@@ -546,6 +553,10 @@ func TestOpsBillingPageServesStandaloneAsset(t *testing.T) {
 	if errWrite := os.WriteFile(filepath.Join(staticDir, "ops-billing.html"), []byte(expectedBody), 0o644); errWrite != nil {
 		t.Fatalf("failed to write ops billing asset: %v", errWrite)
 	}
+	expectedScript := "window.__opsBillingReady = true;"
+	if errWrite := os.WriteFile(filepath.Join(staticDir, "ops-billing-inline-check.js"), []byte(expectedScript), 0o644); errWrite != nil {
+		t.Fatalf("failed to write ops billing script asset: %v", errWrite)
+	}
 
 	server := newTestServer(t)
 	server.configFilePath = filepath.Join(t.TempDir(), "config", "config.yaml")
@@ -559,5 +570,16 @@ func TestOpsBillingPageServesStandaloneAsset(t *testing.T) {
 	}
 	if body := rr.Body.String(); body != expectedBody {
 		t.Fatalf("unexpected body: got %q want %q", body, expectedBody)
+	}
+
+	scriptReq := httptest.NewRequest(http.MethodGet, "/ops-billing-inline-check.js", nil)
+	scriptRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(scriptRR, scriptReq)
+
+	if scriptRR.Code != http.StatusOK {
+		t.Fatalf("unexpected script status code: got %d want %d; body=%s", scriptRR.Code, http.StatusOK, scriptRR.Body.String())
+	}
+	if body := scriptRR.Body.String(); body != expectedScript {
+		t.Fatalf("unexpected script body: got %q want %q", body, expectedScript)
 	}
 }
