@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	_ "modernc.org/sqlite"
 )
@@ -381,7 +381,7 @@ func (s *sqliteStore) prepare() error {
 			if _, err := s.db.Exec(m.ddl); err != nil {
 				return fmt.Errorf("usage sqlite: add column %s: %w", m.column, err)
 			}
-			log.Infof("usage sqlite: migrated schema — added column %s", m.column)
+			log.Infof("usage sqlite: migrated schema 鈥?added column %s", m.column)
 		}
 	}
 

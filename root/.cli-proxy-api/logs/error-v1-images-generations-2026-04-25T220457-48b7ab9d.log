@@ -1,0 +1,27 @@
+=== REQUEST INFO ===
+Version: dev
+URL: /v1/images/generations
+Method: POST
+Downstream Transport: http
+Timestamp: 2026-04-25T22:04:57.3796614+08:00
+
+
+=== HEADERS ===
+Content-Length: 0
+Connection: Keep-Alive
+Authorization: Bearer LB-9...2OFT
+User-Agent: Mozilla/5.0 (Windows NT; Windows NT 10.0; zh-CN) WindowsPowerShell/5.1.26100.8115
+Content-Type: application/json
+
+
+=== REQUEST BODY ===
+
+
+=== RESPONSE ===
+Status: 400
+Content-Type: application/json; charset=utf-8
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: *
+
+{"error":{"message":"Invalid request: body must be valid JSON","type":"invalid_request_error"}}

@@ -11,11 +11,12 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
-	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -50,23 +51,133 @@ func newTestServer(t *testing.T) *Server {
 func TestHealthz(t *testing.T) {
 	server := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
-	rr := httptest.NewRecorder()
-	server.engine.ServeHTTP(rr, req)
+	t.Run("GET", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+
+		var resp struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+		}
+		if resp.Status != "ok" {
+			t.Fatalf("unexpected response status: got %q want %q", resp.Status, "ok")
+		}
+	})
+
+	t.Run("HEAD", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodHead, "/healthz", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
+		}
+	})
+}
+
+func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	prevQueueEnabled := redisqueue.Enabled()
+	redisqueue.SetEnabled(false)
+	t.Cleanup(func() {
+		redisqueue.SetEnabled(false)
+		redisqueue.SetEnabled(prevQueueEnabled)
+	})
+
+	server := newTestServer(t)
+
+	redisqueue.Enqueue([]byte(`{"id":1}`))
+	redisqueue.Enqueue([]byte(`{"id":2}`))
+
+	missingKeyReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
+	missingKeyRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(missingKeyRR, missingKeyReq)
+	if missingKeyRR.Code != http.StatusUnauthorized {
+		t.Fatalf("missing key status = %d, want %d body=%s", missingKeyRR.Code, http.StatusUnauthorized, missingKeyRR.Body.String())
 	}
 
-	var resp struct {
-		Status string `json:"status"`
+	legacyReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage?count=2", nil)
+	legacyReq.Header.Set("Authorization", "Bearer test-management-key")
+	legacyRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(legacyRR, legacyReq)
+	if legacyRR.Code != http.StatusOK {
+		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusOK, legacyRR.Body.String())
 	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+	var legacyPayload map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(legacyRR.Body.Bytes(), &legacyPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal legacy usage response: %v body=%s", errUnmarshal, legacyRR.Body.String())
 	}
-	if resp.Status != "ok" {
-		t.Fatalf("unexpected response status: got %q want %q", resp.Status, "ok")
+	if _, ok := legacyPayload["usage"]; !ok {
+		t.Fatalf("legacy usage response missing usage field: %s", legacyRR.Body.String())
 	}
+
+	authReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
+	authReq.Header.Set("Authorization", "Bearer test-management-key")
+	authRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(authRR, authReq)
+	if authRR.Code != http.StatusOK {
+		t.Fatalf("authenticated status = %d, want %d body=%s", authRR.Code, http.StatusOK, authRR.Body.String())
+	}
+
+	var payload []json.RawMessage
+	if errUnmarshal := json.Unmarshal(authRR.Body.Bytes(), &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v body=%s", errUnmarshal, authRR.Body.String())
+	}
+	if len(payload) != 2 {
+		t.Fatalf("response records = %d, want 2", len(payload))
+	}
+	for i, raw := range payload {
+		var record struct {
+			ID int `json:"id"`
+		}
+		if errUnmarshal := json.Unmarshal(raw, &record); errUnmarshal != nil {
+			t.Fatalf("unmarshal record %d: %v", i, errUnmarshal)
+		}
+		if record.ID != i+1 {
+			t.Fatalf("record %d id = %d, want %d", i, record.ID, i+1)
+		}
+	}
+
+	if remaining := redisqueue.PopOldest(1); len(remaining) != 0 {
+		t.Fatalf("remaining queue = %q, want empty", remaining)
+	}
+}
+
+func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	server.cfg.Home.Enabled = true
+
+	t.Run("management endpoints return 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+		req.Header.Set("Authorization", "Bearer test-management-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
+		}
+	})
+
+	t.Run("management control panel returns 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
+		}
+	})
 }
 
 func TestAmpProviderModelRoutes(t *testing.T) {
@@ -442,6 +553,10 @@ func TestOpsBillingPageServesStandaloneAsset(t *testing.T) {
 	if errWrite := os.WriteFile(filepath.Join(staticDir, "ops-billing.html"), []byte(expectedBody), 0o644); errWrite != nil {
 		t.Fatalf("failed to write ops billing asset: %v", errWrite)
 	}
+	expectedScript := "window.__opsBillingReady = true;"
+	if errWrite := os.WriteFile(filepath.Join(staticDir, "ops-billing-inline-check.js"), []byte(expectedScript), 0o644); errWrite != nil {
+		t.Fatalf("failed to write ops billing script asset: %v", errWrite)
+	}
 
 	server := newTestServer(t)
 	server.configFilePath = filepath.Join(t.TempDir(), "config", "config.yaml")
@@ -455,5 +570,16 @@ func TestOpsBillingPageServesStandaloneAsset(t *testing.T) {
 	}
 	if body := rr.Body.String(); body != expectedBody {
 		t.Fatalf("unexpected body: got %q want %q", body, expectedBody)
+	}
+
+	scriptReq := httptest.NewRequest(http.MethodGet, "/ops-billing-inline-check.js", nil)
+	scriptRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(scriptRR, scriptReq)
+
+	if scriptRR.Code != http.StatusOK {
+		t.Fatalf("unexpected script status code: got %d want %d; body=%s", scriptRR.Code, http.StatusOK, scriptRR.Body.String())
+	}
+	if body := scriptRR.Body.String(); body != expectedScript {
+		t.Fatalf("unexpected script body: got %q want %q", body, expectedScript)
 	}
 }
